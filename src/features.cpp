@@ -288,7 +288,243 @@ void FlipVehicle() {
     memset(&at<float>(veh, PHYS_TURN), 0, 12);
 }
 
-void SetDoorLock(bool locked) { if (void* v = PlayerVehicle()) at<int>(v, VEH_DOORLOCK) = locked ? 2 : 1; }
+// The car the trainer locked. When the player gets out of it, its doors are
+// unlocked again - a locked car can't be re-entered, not even by the player.
+static void* g_trainerLocked = nullptr;
+
+void SetDoorLock(bool locked) {
+    void* v = PlayerVehicle();
+    if (!v) { ShowNative("You are not in a vehicle"); return; }
+    at<int>(v, VEH_DOORLOCK) = locked ? 2 : 1;
+    g_trainerLocked = locked ? v : nullptr;
+    ShowNative(locked ? "Doors locked" : "Doors unlocked");
+}
+
+// True if p is a vehicle that still exists in the game's vehicle pool.
+static bool IsLiveVehicle(void* p) {
+    char* pool = (char*)*VehiclePool;
+    if (!pool || !p) return false;
+    char* objs = *(char**)(pool + POOL_OBJECTS);
+    unsigned char* flags = *(unsigned char**)(pool + POOL_FLAGS);
+    int size = *(int*)(pool + POOL_SIZE);
+    int off = (int)((char*)p - objs);
+    if (off < 0 || off % VEHICLE_POOL_STRIDE) return false;
+    int i = off / VEHICLE_POOL_STRIDE;
+    return i < size && !(flags[i] & 0x80);
+}
+
+// ------------------------------------------------------------------ heavy car
+// The player's car gets the Rhino's mass, so the game's own physics shoves
+// other cars aside. Optionally, any car it touches is also flung away or blown up.
+static void HeavyCarTick(const Settings& A) {
+    static void* heavy = nullptr;        // car whose mass we changed
+    static float origMass = 0, origTurnMass = 0;
+    static std::vector<std::pair<void*, DWORD>> hitTimes;
+
+    void* veh = PlayerVehicle();
+    bool want = A.heavyCar && veh;
+
+    if (heavy && (!want || heavy != veh)) {           // restore the car we changed
+        if (IsLiveVehicle(heavy)) {
+            at<float>(heavy, PHYS_MASS) = origMass;
+            at<float>(heavy, PHYS_TURN_MASS) = origTurnMass;
+        }
+        heavy = nullptr;
+    }
+    if (!want) return;
+    if (heavy != veh) {
+        heavy = veh;
+        origMass = at<float>(veh, PHYS_MASS);
+        origTurnMass = at<float>(veh, PHYS_TURN_MASS);
+    }
+    if (origMass > 0 && origMass < RHINO_MASS) {
+        at<float>(veh, PHYS_MASS) = RHINO_MASS;
+        at<float>(veh, PHYS_TURN_MASS) = origTurnMass * (RHINO_MASS / origMass);
+    }
+
+    if (A.heavyMode == 0) return;
+    float* mv = &at<float>(veh, PHYS_MOVE);
+    float mySpeed = sqrtf(mv[0] * mv[0] + mv[1] * mv[1]);
+    if (mySpeed < 0.03f) return;                      // ~5 km/h: parked next to a car does nothing
+
+    char* pool = (char*)*VehiclePool; if (!pool) return;
+    char* objs = *(char**)(pool + POOL_OBJECTS);
+    unsigned char* flags = *(unsigned char**)(pool + POOL_FLAGS);
+    int size = *(int*)(pool + POOL_SIZE);
+    float* p = &at<float>(veh, ENT_POS);
+    float* r = &at<float>(veh, ENT_RIGHT);
+    float* f = &at<float>(veh, ENT_FWD);
+    DWORD now = GetTickCount();
+
+    for (int i = 0; i < size; i++) {
+        if (flags[i] & 0x80) continue;
+        void* o = objs + i * VEHICLE_POOL_STRIDE;
+        if (o == veh || at<float>(o, VEH_HEALTH) <= 0.0f) continue;   // self, or already wrecked
+        float* op = &at<float>(o, ENT_POS);
+        float d[3] = { op[0] - p[0], op[1] - p[1], op[2] - p[2] };
+        if (fabsf(d[2]) > 3.0f) continue;
+        // in the player car's own frame: touching = within its box plus a car's width
+        float side = d[0] * r[0] + d[1] * r[1], ahead = d[0] * f[0] + d[1] * f[1];
+        if (fabsf(side) > 2.8f || fabsf(ahead) > 4.8f) continue;
+
+        bool recent = false;
+        for (auto& h : hitTimes) if (h.first == o && now - h.second < 1500) recent = true;
+        if (recent) continue;
+        hitTimes.push_back({ o, now });
+
+        if (A.heavyMode == 2) {
+            VehicleBlowUp(o, nullptr);
+        } else {
+            float len = sqrtf(d[0] * d[0] + d[1] * d[1]);
+            float dx = len > 0.01f ? d[0] / len : f[0], dy = len > 0.01f ? d[1] / len : f[1];
+            float push = fmaxf(0.8f, mySpeed * 2.5f);
+            float* om = &at<float>(o, PHYS_MOVE);
+            om[0] = dx * push; om[1] = dy * push; om[2] = 0.35f;
+            float* ot = &at<float>(o, PHYS_TURN);
+            ot[0] += 0.02f; ot[2] += (side > 0 ? 0.05f : -0.05f);
+        }
+    }
+    if (hitTimes.size() > 64) {                        // forget old hits
+        std::vector<std::pair<void*, DWORD>> keep;
+        for (auto& h : hitTimes) if (now - h.second < 1500) keep.push_back(h);
+        hitTimes.swap(keep);
+    }
+}
+
+// ---- never fall off bike -------------------------------------------------
+// The knock-off hook reports every time the game throws the player off a bike;
+// the game finishes the fall normally and we put the player straight back on.
+static void* g_kbBike = nullptr;
+static DWORD g_kbTime = 0;
+static float g_kbMove[3];
+static bool  g_forcingOff = false;     // our own ForceOffBike: don't re-seat
+static DWORD g_exitPressTime = 0;      // last time the exit button was pressed on a bike
+
+void BikeKnockedOff(void* bike) {
+    if (g_forcingOff || !bike) return;
+    g_kbBike = bike;
+    g_kbTime = GetTickCount();
+    memcpy(g_kbMove, &at<float>(bike, PHYS_MOVE), 12);
+}
+
+static void ForceOff(void* bike, void* ped) {
+    g_forcingOff = true;
+    ForceOffBike(bike, ped);
+    g_forcingOff = false;
+    g_kbBike = nullptr;
+}
+
+static bool BikeUsable(void* bike) {
+    return IsLiveVehicle(bike) && at<float>(bike, VEH_HEALTH) > 0.0f &&
+           (at<unsigned char>(bike, ENT_STATUS) >> 3) != 5;          // not STATUS_WRECKED
+}
+
+static void StandBikeUp(void* bike) {
+    float* f = &at<float>(bike, ENT_FWD);
+    float len = sqrtf(f[0] * f[0] + f[1] * f[1]);
+    float fx = len > 0.01f ? f[0] / len : 0.0f, fy = len > 0.01f ? f[1] / len : 1.0f;
+    EntityRemove(bike);
+    float* r = &at<float>(bike, ENT_RIGHT); r[0] = fy; r[1] = -fx; r[2] = 0;
+    f[0] = fx; f[1] = fy; f[2] = 0;
+    float* u = &at<float>(bike, ENT_UP); u[0] = 0; u[1] = 0; u[2] = 1;
+    at<float>(bike, ENT_POS + 8) += 0.6f;
+    memset(&at<float>(bike, PHYS_TURN), 0, 12);
+    EntityAdd(bike);
+}
+
+static void StayOnBikeTick(const Settings& A) {
+    void* bike = g_kbBike;
+    if (!bike) return;
+    DWORD now = GetTickCount();
+    void* ped = PlayerPed();
+    if (!A.stayOnBike || !ped || now - g_kbTime > 1500) { g_kbBike = nullptr; return; }
+    if (now - g_exitPressTime < 2000) { g_kbBike = nullptr; return; } // player asked to get off
+    void* cur = PlayerVehicle();
+    if (cur && cur != bike) { g_kbBike = nullptr; return; }          // took another vehicle
+    if (cur == bike && at<unsigned char>(ped, PED_IN_VEHICLE)) return; // fall not finished yet
+    g_kbBike = nullptr;
+    if (!BikeUsable(bike) || at<float>(ped, PED_HEALTH) <= 1.0f) return; // dead bike / dying: let go
+    // Falls in quick succession (each within 1.5 s of the last) form a streak.
+    static DWORD lastReseat = 0;
+    static int streak = 0;
+    streak = (now - lastReseat < 1500) ? streak + 1 : 1;
+    lastReseat = now;
+    if (streak > 10) {                       // e.g. sinking in water: nothing will hold
+        ShowNative("Couldn't keep you on the bike");
+        streak = 0;
+        return;
+    }
+
+    bool tipped = at<float>(bike, ENT_UP + 8) < 0.6f;
+    if (tipped) StandBikeUp(bike);
+    float* mv = &at<float>(bike, PHYS_MOVE);
+    float now3[3]; memcpy(now3, mv, 12);
+    float before = sqrtf(g_kbMove[0] * g_kbMove[0] + g_kbMove[1] * g_kbMove[1] + g_kbMove[2] * g_kbMove[2]);
+    float after  = sqrtf(now3[0] * now3[0] + now3[1] * now3[1] + now3[2] * now3[2]);
+    // Lost a lot of speed = hit something (wall, car). Restoring the old speed
+    // would just drive the bike back into it, so keep the speed it has now.
+    bool hit = after < before * 0.6f;
+
+    WarpPlayerInto(bike);
+    if (streak >= 2 || tipped) {             // repeated crash: put the bike at rest
+        memset(mv, 0, 12);
+        memset(&at<float>(bike, PHYS_TURN), 0, 12);
+    } else if (hit) {
+        memcpy(mv, now3, 12);
+    } else {
+        memcpy(mv, g_kbMove, 12);            // shot / bump: keep riding at the same speed
+    }
+}
+
+// Bike exit rules (Pads[0]: NewState.Triangle +0x1E is the exit button,
+// +0xF0 DisablePlayerControls - checked so cutscenes/missions aren't broken):
+//  - exit pressed and the game doesn't start getting off within 0.2 s (it
+//    refuses while the bike is in the air): eject the player anyway;
+//  - exit held 1.5 s while still on: eject (never fall off bike only);
+//  - on the bike but not riding (broken state) for 3 s: eject (same).
+static void BikeExitFix(const Settings& A) {
+    static DWORD heldSince = 0, oddSince = 0, pressAt = 0;
+    static bool prevTri = false;
+    void* ped = PlayerPed();
+    void* veh = PlayerVehicle();
+    bool tri = at<short>(Pad0, 0x1E) != 0;
+    bool pressed = tri && !prevTri;
+    prevTri = tri;
+    if (!A.enabled || g_menuOpen || !ped || !veh || at<int>(veh, VEH_TYPE) != 5 ||
+        !at<unsigned char>(ped, PED_IN_VEHICLE)) { heldSince = oddSince = pressAt = 0; return; }
+    bool controls = at<short>(Pad0, 0xF0) == 0;
+    DWORD now = GetTickCount();
+    bool riding = (at<void*>(veh, 0x1A8) == ped || at<void*>(veh, 0x1AC) == ped) &&   // driver / passenger
+                  at<int>(ped, 0x244) == 0x32;                                        // PED_DRIVING
+
+    if (pressed && controls) { pressAt = now; g_exitPressTime = now; }
+    if (pressAt && now - pressAt > 200) {
+        pressAt = 0;
+        if (riding) { ForceOff(veh, ped); heldSince = oddSince = 0; return; }        // game refused
+    }
+
+    if (!A.stayOnBike) { heldSince = oddSince = 0; return; }
+    if (riding) oddSince = 0;
+    else if (!oddSince) oddSince = now;
+    else if (now - oddSince > 3000) { ForceOff(veh, ped); oddSince = heldSince = 0; return; }
+
+    if (!tri || !controls) { heldSince = 0; return; }
+    if (!heldSince) heldSince = now;
+    if (now - heldSince > 1500) { ForceOff(veh, ped); heldSince = 0; }
+}
+
+static void UnlockOnExit() {
+    static void* lastVeh = nullptr;
+    void* cur = PlayerVehicle();
+    if (lastVeh && cur != lastVeh && lastVeh == g_trainerLocked) {
+        if (IsLiveVehicle(lastVeh) && at<int>(lastVeh, VEH_DOORLOCK) == 2) {
+            at<int>(lastVeh, VEH_DOORLOCK) = 1;
+            ShowNative("Doors unlocked so you can get back in");
+        }
+        g_trainerLocked = nullptr;
+    }
+    lastVeh = cur;
+}
 
 void BoostVehicle(float amount) {
     void* veh = PlayerVehicle(); if (!veh) return;
@@ -411,6 +647,7 @@ std::vector<HotkeyAction>& HotkeyActions() {
     // ids of the first hotkeys are kept so older VCTrainer.ini bindings still load
     press("General", "master", "Trainer on/off (all cheats)", [] { SetTrainerEnabled(!S.enabled); });
     press("General", "menu_camera_reset", "Camera behind player", [] { CameraBehindPlayer(TheCamera); });
+    press("General", "all_off", "Turn every cheat off", [] { TurnEverythingOff(); });
 
     const char* P = "Player";
     tog(P, "god", "Infinite health", &S.godMode);
@@ -443,6 +680,12 @@ std::vector<HotkeyAction>& HotkeyActions() {
 
     const char* V = "Vehicle";
     tog(V, "stay_on_bike", "Never fall off bike", &S.stayOnBike);
+    tog(V, "heavy_car", "Heavy car (like the Rhino)", &S.heavyCar);
+    press(V, "heavy_mode", "Heavy car: change what touching does", [] {
+        S.heavyMode = (S.heavyMode + 1) % 3;
+        const char* m[] = { "just heavy", "push cars far away", "blow cars up" };
+        ShowNative("Heavy car: %s", m[S.heavyMode]);
+    });
     tog(V, "car_god", "Car god mode", &S.carGodMode);
     tog(V, "auto_repair", "Auto repair", &S.autoRepair);
     tog(V, "warp_into_spawned", "Put me in spawned vehicles", &S.warpIntoSpawned);
@@ -500,6 +743,7 @@ std::vector<HotkeyAction>& HotkeyActions() {
     tog(O, "overlay_coords", "Show coordinates", &S.overlayCoords);
     tog(O, "overlay_speed", "Show vehicle speed", &S.overlaySpeed);
     tog(O, "overlay_fps", "Show FPS", &S.overlayFps);
+    tog(O, "overlay_active", "Show active cheats list", &S.overlayActive);
 
     for (auto& g : kWeapons)
         for (auto& w : g.w) {
@@ -515,7 +759,11 @@ std::vector<HotkeyAction>& HotkeyActions() {
             std::string id = "cheat_" + std::string(c.code);
             for (auto& ch : id) ch = (char)tolower(ch);
             const char* code = c.code;
-            press("Game cheats", id, c.desc, [code] { RunNativeCheat(code); });
+            if (NativeCheatHasState(code))   // switches: each press flips it on/off
+                press("Game cheats", id, std::string(c.desc) + " (on/off)",
+                      [code] { SetNativeCheat(code, !NativeCheatOn(code)); });
+            else
+                press("Game cheats", id, c.desc, [code] { RunNativeCheat(code); });
         }
     return list;
 }
@@ -575,7 +823,7 @@ void HotkeyName(int vk, int mods, char* out, int size) {
 
 static const char* kIni = "VCTrainer.ini";
 static struct { const char* key; bool* val; } kBools[] = {
-    {"enabled", &S.enabled}, {"stay_on_bike", &S.stayOnBike},
+    {"enabled", &S.enabled}, {"stay_on_bike", &S.stayOnBike}, {"heavy_car", &S.heavyCar},
     {"god_mode", &S.godMode}, {"infinite_armour", &S.infiniteArmour}, {"never_wanted", &S.neverWanted},
     {"infinite_ammo", &S.infiniteAmmo}, {"no_reload", &S.noReload}, {"never_tired", &S.neverTired},
     {"fast_reload", &S.fastReload}, {"car_god", &S.carGodMode}, {"auto_repair", &S.autoRepair},
@@ -585,7 +833,7 @@ static struct { const char* key; bool* val; } kBools[] = {
     {"p_melee", &S.playerProofs.melee}, {"c_bullet", &S.carProofs.bullet}, {"c_fire", &S.carProofs.fire},
     {"c_explosion", &S.carProofs.explosion}, {"c_collision", &S.carProofs.collision},
     {"c_melee", &S.carProofs.melee}, {"overlay_coords", &S.overlayCoords},
-    {"overlay_speed", &S.overlaySpeed}, {"overlay_fps", &S.overlayFps},
+    {"overlay_speed", &S.overlaySpeed}, {"overlay_fps", &S.overlayFps}, {"overlay_active", &S.overlayActive},
 };
 // Freeze time is not restored at startup on purpose: the frozen hour comes from
 // the moment it was switched on, which a new session doesn't have.
@@ -604,6 +852,7 @@ void LoadSettings() {
         }
         if (!strcmp(key, "mouse_speed")) g_mouseSensitivity = (float)atof(val);
         if (!strcmp(key, "fly_speed")) S.flySpeed = (float)atof(val);
+        if (!strcmp(key, "heavy_mode")) S.heavyMode = atoi(val) % 3;
     }
     fclose(f);
 }
@@ -617,10 +866,11 @@ void SaveSettings() {
         if (h.vk) fprintf(f, "key_%s = %d\nkeymods_%s = %d\n", h.id.c_str(), h.vk, h.id.c_str(), h.mods);
     fprintf(f, "mouse_speed = %.2f\n", g_mouseSensitivity);
     fprintf(f, "fly_speed = %.1f\n", S.flySpeed);
+    fprintf(f, "heavy_mode = %d\n", S.heavyMode);
     fclose(f);
 }
 
-bool OverlayEnabled() { return S.enabled && (S.overlayCoords || S.overlaySpeed || S.overlayFps); }
+bool OverlayEnabled() { return S.enabled && (S.overlayCoords || S.overlaySpeed || S.overlayFps || S.overlayActive); }
 
 // A combo matches only with exactly its modifiers held, so "F" and "Shift + F"
 // can be bound to different things.
@@ -663,6 +913,99 @@ static void ProcessHotkeys() {
 // ------------------------------------------------------------------ native cheats
 void RunNativeCheat(const char* code) {
     for (const char* c = code; *c; c++) AddToPCCheatString(Pad0, *c);
+}
+
+static const CheatFlag* FindCheatFlag(const char* code) {
+    for (auto& f : kCheatFlags) if (!strcmp(f.code, code)) return &f;
+    return nullptr;
+}
+
+bool NativeCheatHasState(const char* code) { return FindCheatFlag(code) != nullptr; }
+
+bool NativeCheatIsOneWay(const char* code) {
+    for (auto c : kOneWayCheats) if (!strcmp(c, code)) return true;
+    return false;
+}
+
+const char* NativeCheatLabel(const char* code) {
+    for (auto& g : kCheats)
+        for (auto& c : g.c) if (c.code && !strcmp(c.code, code)) return c.desc;
+    return code;
+}
+
+bool NativeCheatOn(const char* code) {
+    const CheatFlag* f = FindCheatFlag(code);
+    if (!f) return false;
+    switch (f->kind) {
+    case 0: case 1: return *(unsigned char*)f->addr != 0;
+    case 2: return *(int*)f->addr != 0;
+    case 3: {   // fat and skinny share one value: fat is above normal, skinny below
+        float v = *(float*)f->addr;
+        return strcmp(code, "DEEPFRIEDMARSBARS") == 0 ? (v != 1.0f && v > 0.0f) : v < 0.0f;
+    }
+    }
+    return false;
+}
+
+// Writes the flag directly (no "Cheat activated" message, and works for the
+// cheats the game itself can only switch on).
+void SetNativeCheat(const char* code, bool on) {
+    const CheatFlag* f = FindCheatFlag(code);
+    if (!f) { if (on) RunNativeCheat(code); return; }
+    if (f->kind == 3) {
+        if (on) RunNativeCheat(code);          // the game's own value for fat / skinny
+        else *(float*)f->addr = 1.0f;          // the exe's initial value = normal
+    } else if (f->kind == 2) {
+        *(int*)f->addr = on ? 1 : 0;
+    } else {
+        *(unsigned char*)f->addr = on ? 1 : 0;
+        // pink and black traffic exclude each other, as in the game
+        if (on && !strcmp(code, "AHAIRDRESSERSCAR")) *(unsigned char*)0xA10B82 = 0;
+        if (on && !strcmp(code, "IWANTITPAINTEDBLACK")) *(unsigned char*)0xA10B26 = 0;
+    }
+    ShowNative("%s: %s", NativeCheatLabel(code), on ? "ON" : "OFF");
+}
+
+std::vector<ActiveItem> ActiveCheats() {
+    std::vector<ActiveItem> out;
+    if (!S.enabled) return out;   // master switch off: nothing from the trainer is running
+
+    for (auto& h : HotkeyActions()) {
+        if (h.kind != HotkeyAction::Toggle || !h.toggle || !*h.toggle) continue;
+        if (h.id == "warp_into_spawned" || h.category == "Overlay") continue;   // preferences, not cheats
+        bool* t = h.toggle;
+        out.push_back({ h.label, h.category, [t] { *t = false; } });
+    }
+    if (FindPlayerPed()) {
+        for (auto& f : kCheatFlags) {
+            if (!NativeCheatOn(f.code)) continue;
+            const char* code = f.code;
+            out.push_back({ NativeCheatLabel(code), "Game cheat", [code] { SetNativeCheat(code, false); } });
+        }
+        if (*ForcedWeather >= 0) {
+            const char* names[] = { "Sunny", "Cloudy", "Rain", "Fog", "Extra sunny", "Hurricane", "Extra colours" };
+            int w = *ForcedWeather;
+            out.push_back({ std::string("Weather locked: ") + (w < 7 ? names[w] : "?"), "World", [] { ReleaseWeather(); } });
+        }
+        if (fabsf(*TimeScale - 1.0f) > 0.01f) {
+            char b[48]; snprintf(b, sizeof b, "Game speed %.2fx", *TimeScale);
+            out.push_back({ b, "World", [] { *TimeScale = 1.0f; } });
+        }
+        if (fabsf(*PedDensity - 1.0f) > 0.01f) {
+            char b[48]; snprintf(b, sizeof b, "Pedestrians %.2fx", *PedDensity);
+            out.push_back({ b, "World", [] { *PedDensity = 1.0f; } });
+        }
+        if (fabsf(*CarDensity - 1.0f) > 0.01f) {
+            char b[48]; snprintf(b, sizeof b, "Traffic %.2fx", *CarDensity);
+            out.push_back({ b, "World", [] { *CarDensity = 1.0f; } });
+        }
+    }
+    return out;
+}
+
+void TurnEverythingOff() {
+    for (auto& a : ActiveCheats()) a.turnOff();
+    ShowNative("All cheats turned off");
 }
 
 // ------------------------------------------------------------------ fly mode
@@ -759,6 +1102,16 @@ void TrainerTick() {
             char* w = (char*)ped + PED_WEAPONS + i * WEAPON_SIZE;
             int type = *(int*)(w + WEAP_TYPE);
             if (type <= 0) continue;
+            // The detonator (given after throwing remote grenades) has 1 charge;
+            // using it drops that to 0 and the game swaps back to your weapon.
+            // Refilling it left Tommy stuck pressing the button, and giving a
+            // weapon in that state crashed the game. Never refill it, and repair
+            // a detonator a previous version already over-filled.
+            if (type == WEAPON_DETONATOR) {
+                if (*(int*)(w + WEAP_TOTAL) > 1) *(int*)(w + WEAP_TOTAL) = 1;
+                if (*(int*)(w + WEAP_CLIP) > 1) *(int*)(w + WEAP_CLIP) = 1;
+                continue;
+            }
             char* info = GetWeaponInfo(type);
             if (*(int*)(info + WI_FIRETYPE) == 0) continue; // melee
             if (A.infiniteAmmo && *(int*)(w + WEAP_TOTAL) < 9000) *(int*)(w + WEAP_TOTAL) = 9999;
@@ -766,6 +1119,11 @@ void TrainerTick() {
             if (A.noReload && clip > 1 && *(int*)(w + WEAP_CLIP) < clip) *(int*)(w + WEAP_CLIP) = clip;
         }
     }
+
+    UnlockOnExit();   // safety fix: always on, even with the master switch off
+    HeavyCarTick(A);
+    StayOnBikeTick(A);
+    BikeExitFix(A);
 
     static Proofs lastPed, lastCar;
     static void* lastCarPtr = nullptr;

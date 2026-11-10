@@ -13,6 +13,7 @@
 #include "features.h"
 #include <d3d8.h>
 #include <float.h>
+#include <math.h>
 
 using namespace game;
 
@@ -208,10 +209,21 @@ static KnockOff_t g_origKnockOff = nullptr;
 
 // __fastcall with an unused edx matches the game's __thiscall (bike in ecx,
 // callee pops the 4 stack arguments).
+// "Never fall off bike" does NOT skip the knock-off: many callers have already
+// changed the ped/bike state before calling it, so skipping it left the player
+// half-off (stuck on the bike, unable to exit or enter anything). The game now
+// finishes the knock-off normally and the trainer seats the player back on the
+// bike next frame (BikeKnockedOff / StayOnBikeTick in features.cpp).
 static void* __fastcall HookedKnockOffRider(void* bike, void*, int weapon, int dir, void* ped, bool getBackOn) {
-    if (Active().stayOnBike && ped && ped == FindPlayerPed())
-        return ped;   // what the original returns; the rider just stays seated
+    bool player = ped && ped == FindPlayerPed();
+    if (player && Active().stayOnBike) BikeKnockedOff(bike);   // remembers speed before the fall
     return g_origKnockOff(bike, weapon, dir, ped, getBackOn);
+}
+
+// Takes the rider off through the game's own routine, without re-seating.
+void ForceOffBike(void* bike, void* ped) {
+    // weapon type 44 = WEAPONTYPE_FALL (43 is DROWNING: water splash + sound)
+    if (g_origKnockOff && bike && ped) g_origKnockOff(bike, 0x2C, 0, ped, false);
 }
 
 static bool HookKnockOffRider() {

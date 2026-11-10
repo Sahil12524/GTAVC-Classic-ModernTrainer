@@ -185,6 +185,19 @@ static void VehicleTab() {
     ImGui::Checkbox("Auto repair", &S.autoRepair);
     ImGui::Checkbox("Never fall off bike", &S.stayOnBike);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Crashes, hits and shots no longer throw you off a motorbike.");
+    ImGui::SameLine(250);
+    ImGui::Checkbox("Heavy car (like the Rhino)", &S.heavyCar);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Your car gets the Rhino tank's weight, so it shoves other cars aside.\n"
+                          "Your car's normal weight comes back when you turn this off or get out.");
+    if (S.heavyCar) {
+        ImGui::Indent();
+        ImGui::TextDisabled("When you touch another car while driving:");
+        ImGui::RadioButton("Just heavy", &S.heavyMode, 0);          ImGui::SameLine();
+        ImGui::RadioButton("Push it far away", &S.heavyMode, 1);    ImGui::SameLine();
+        ImGui::RadioButton("Blow it up", &S.heavyMode, 2);
+        ImGui::Unindent();
+    }
     ProofsUI("cp", S.carProofs, true);
 
     if (veh && ImGui::CollapsingHeader("Paint")) {
@@ -355,18 +368,76 @@ static void TeleportTab() {
 }
 
 static void CheatsTab() {
-    ImGui::TextDisabled("The game's own built-in cheats. Hover a button to see its code.");
+    ImGui::TextDisabled("Checkboxes are cheats that stay on: tick to turn on, untick to turn off.\n"
+                        "Buttons happen once. Hover anything to see the original code.");
+    bool inGame = PlayerPed() != nullptr;
     ImGui::BeginChild("cheats", ImVec2(0, 0), ImGuiChildFlags_None);
     for (auto& g : kCheats) {
         Section(g.group);
         int n = 0;
-        for (auto& c : g.c) {
-            if (!c.code) break;
-            if (n++ % 3) ImGui::SameLine();
-            const char* code = c.code;
-            if (ImGui::Button(c.desc, ImVec2(170, 0))) Queue([code] { RunNativeCheat(code); });
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", code);
+        if (ImGui::BeginTable(g.group, 3, ImGuiTableFlags_SizingStretchSame)) {
+            for (auto& c : g.c) {
+                if (!c.code) break;
+                ImGui::TableNextColumn();
+                const char* code = c.code;
+                ImGui::PushID(code);
+                if (NativeCheatHasState(code)) {
+                    bool on = inGame && NativeCheatOn(code);
+                    const bool green = on;
+                    if (green) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.95f, 0.65f, 1.0f));
+                    if (ImGui::Checkbox(c.desc, &on)) Queue([code, on] { SetNativeCheat(code, on); });
+                    if (green) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nStays on until you untick it.", code);
+                } else {
+                    bool oneWay = NativeCheatIsOneWay(code);
+                    if (ImGui::Button(c.desc, ImVec2(-FLT_MIN, 0))) Queue([code] { RunNativeCheat(code); });
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(oneWay ? "%s\nCan't be switched off - reload your save to undo it."
+                                                 : "%s", code);
+                }
+                ImGui::PopID();
+                n++;
+            }
+            ImGui::EndTable();
         }
+    }
+    ImGui::EndChild();
+}
+
+static void ActiveTab() {
+    auto items = ActiveCheats();
+    if (!S.enabled) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.4f, 1.0f), "The trainer is OFF - nothing from it is running.");
+        return;
+    }
+    if (items.empty()) {
+        ImGui::TextDisabled("Nothing is switched on right now.");
+        return;
+    }
+    ImGui::Text("%d active", (int)items.size());
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 170);
+    if (ImGui::Button("Turn everything off", ImVec2(170, 0))) Queue([] { TurnEverythingOff(); });
+
+    ImGui::BeginChild("active", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    if (ImGui::BeginTable("activelist", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Cheat", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn("Off", ImGuiTableColumnFlags_WidthFixed, 70);
+        for (size_t i = 0; i < items.size(); i++) {
+            ImGui::PushID((int)i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(ImVec4(0.40f, 0.95f, 0.65f, 1.0f), "%s", items[i].label.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", items[i].detail.c_str());
+            ImGui::TableNextColumn();
+            auto off = items[i].turnOff;
+            if (ImGui::Button("Turn off", ImVec2(-FLT_MIN, 0))) Queue(off);
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
     }
     ImGui::EndChild();
 }
@@ -493,6 +564,7 @@ static void SettingsTab() {
     ImGui::Checkbox("Coordinates", &S.overlayCoords); ImGui::SameLine(160);
     ImGui::Checkbox("Vehicle speed", &S.overlaySpeed); ImGui::SameLine(320);
     ImGui::Checkbox("FPS", &S.overlayFps);
+    ImGui::Checkbox("Active cheats list", &S.overlayActive);
     Section("Settings file");
     ImGui::TextWrapped("Toggles, hotkeys and mouse speed are saved to VCTrainer.ini when you close the menu.");
     if (ImGui::Button("Save now")) SaveSettings();
@@ -513,6 +585,12 @@ static void DrawOverlay() {
         if (S.overlayCoords && GetPlayerPos(p)) ImGui::Text("%.1f, %.1f, %.1f", p[0], p[1], p[2]);
         if (S.overlaySpeed && PlayerVehicle()) ImGui::Text("%.0f km/h", VehicleSpeedKmh());
         if (S.overlayFps) ImGui::Text("%.0f FPS", ImGui::GetIO().Framerate);
+        if (S.overlayActive) {
+            auto items = ActiveCheats();
+            if (S.overlayCoords || S.overlaySpeed || S.overlayFps) ImGui::Separator();
+            if (items.empty()) ImGui::TextDisabled("No cheats active");
+            for (auto& a : items) ImGui::TextColored(ImVec4(0.40f, 0.95f, 0.65f, 1.0f), "%s", a.label.c_str());
+        }
     }
     ImGui::End();
 }
@@ -539,6 +617,9 @@ void DrawTrainerMenu() {
     }
 
     if (ImGui::BeginTabBar("tabs")) {
+        char activeLabel[32];
+        snprintf(activeLabel, sizeof activeLabel, "Active (%d)###active", (int)ActiveCheats().size());
+        if (ImGui::BeginTabItem(activeLabel)) { ActiveTab(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Player"))   { PlayerTab();   ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Weapons"))  { WeaponsTab();  ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Vehicle"))  { VehicleTab();  ImGui::EndTabItem(); }

@@ -16,6 +16,8 @@ struct Settings {
     Proofs playerProofs;
     // vehicle
     bool carGodMode = false, autoRepair = false;
+    bool heavyCar = false;
+    int  heavyMode = 1;       // what touching another car does: 0 heavy only, 1 push far away, 2 blow up
     Proofs carProofs;
     bool neverTired = false, fastReload = false, stayOnBike = false;
     bool flyMode = false;
@@ -25,7 +27,7 @@ struct Settings {
     bool freezeTime = false, freezeMissionTimer = false;
     int  frozenHour = 12, frozenMinute = 0;
     // overlay
-    bool overlayCoords = false, overlaySpeed = false, overlayFps = false;
+    bool overlayCoords = false, overlaySpeed = false, overlayFps = false, overlayActive = false;
 };
 extern Settings S;
 // The settings that are in effect right now: S, or all-off while the master
@@ -112,3 +114,13 @@ void TeleportToBlip(const Blip& b);
 
 // native cheats
 void RunNativeCheat(const char* code);
+bool NativeCheatHasState(const char* code);   // has an on/off switch the trainer can read
+bool NativeCheatIsOneWay(const char* code);   // can't be undone without reloading
+bool NativeCheatOn(const char* code);
+void SetNativeCheat(const char* code, bool on);
+const char* NativeCheatLabel(const char* code);
+
+// everything currently switched on, for the Active list and overlay
+struct ActiveItem { std::string label, detail; std::function<void()> turnOff; };
+std::vector<ActiveItem> ActiveCheats();
+void TurnEverythingOff();

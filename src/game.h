@@ -109,10 +109,13 @@ constexpr int ENT_STATUS = 0x50;
 constexpr int PHYS_FLAGS1 = 0x52;  // bit 0x02 explosion proof
 constexpr int PHYS_FLAGS2 = 0x53;  // 0x02 bullet, 0x04 fire, 0x08 collision, 0x10 melee
 constexpr int PHYS_MOVE = 0x70, PHYS_TURN = 0x7C;
+constexpr int PHYS_MASS = 0xB8, PHYS_TURN_MASS = 0xBC;   // CAutomobile ctor copies them from handling
+constexpr float RHINO_MASS = 18000.0f;                    // data\handling.cfg, RHINO
 constexpr int PED_HEALTH = 0x354, PED_ARMOUR = 0x358;
 constexpr int PED_VEHICLE = 0x3A8, PED_IN_VEHICLE = 0x3AC;
 constexpr int PED_WEAPONS = 0x408, WEAPON_SIZE = 0x18, WEAPON_SLOTS = 10;
 constexpr int WEAP_TYPE = 0x0, WEAP_CLIP = 0x8, WEAP_TOTAL = 0xC;
+constexpr int WEAPON_DETONATOR = 34;   // weapon.dat row 34 ("Detonator", model 291)
 constexpr int PED_WANTED = 0x5F4, WANTED_LEVEL = 0x20;
 constexpr int VEH_COLOR1 = 0x1A0, VEH_COLOR2 = 0x1A1;  // opcode 0229
 constexpr int VEH_HEALTH = 0x204, VEH_DOORLOCK = 0x230, VEH_TYPE = 0x29C, VEH_DAMAGE = 0x2A0;
@@ -127,6 +130,8 @@ template <class T> inline T& at(void* base, int off) { return *(T*)((char*)base 
 
 // CEntity virtuals (CWorld::Add calls vtable[0], CWorld::Remove calls vtable[1]):
 // they put the entity into / take it out of the world sector lists.
+// CVehicle::BlowUpCar(culprit) is vtable +0x80 (the BIGBANG cheat calls it with 0).
+inline void VehicleBlowUp(void* v, void* culprit) { ((void(__thiscall*)(void*, void*))(*(void***)v)[0x80 / 4])(v, culprit); }
 inline void EntityAdd(void* e)    { ((void(__thiscall*)(void*))(*(void***)e)[0])(e); }
 inline void EntityRemove(void* e) { ((void(__thiscall*)(void*))(*(void***)e)[1])(e); }
 

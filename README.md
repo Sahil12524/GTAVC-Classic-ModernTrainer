@@ -44,12 +44,15 @@ press **INSERT** (or **F7**).
 **Weapons**
 - Give any of the 33 weapons with the ammo you choose
 - The game's three weapon sets
+- Infinite ammo leaves the remote grenade detonator alone, so the detonator never gets stuck in your hand
 
 **Vehicles**
 - Spawn any car, bike, boat, helicopter or RC vehicle (searchable list with in-game names), optionally seated in it
-- Repair, flip upright, lock/unlock doors, boost, jump, stop
+- Repair, flip upright, lock/unlock doors (with an on-screen message), boost, jump, stop
+- Doors you locked with the trainer unlock automatically when you get out, so you can always get back in
 - Car god mode, auto repair, bulletproof / fireproof / explosion-proof / solid (collision-proof) / melee-proof car
-- **Never fall off bikes**
+- **Never fall off bikes:** crashes, hits and shots can't throw you off. You're put straight back on, the bike is stood up if it tipped, and pressing exit still gets you off (even in mid-air)
+- **Heavy car (like the Rhino):** your car gets tank weight, and touching another car can **push it far away** or **blow it up**
 - Repaint from the game's own 95-colour palette
 - Get into the nearest vehicle
 
@@ -65,6 +68,8 @@ press **INSERT** (or **F7**).
 
 **Game cheats**
 - All 58 built-in Vice City cheats, one click each (decoded straight from the game)
+- Cheats that stay on get a real **on/off switch** showing their true state, including ones the game itself can't turn off
+- **Active** tab and optional on-screen list of everything currently switched on, with one-click turn off
 
 **Quality of life**
 - Every feature can be put on a hotkey, including key combinations like `Ctrl + G`, `Shift + F`, `Alt + 1` and mouse buttons
@@ -127,18 +132,23 @@ or pause screen.
 |---|---|
 | **Player** | Health/armour cheats, sprint, reload, proofs, fly mode, health & armour sliders, max health/armour, wanted stars, money |
 | **Weapons** | Infinite ammo / no reload, the three weapon sets, a button for every weapon, custom ammo amount |
-| **Vehicle** | Current-vehicle tools (repair, flip, doors, boost, jump, stop), protection options, never fall off bike, paint, and the vehicle spawner with category buttons and a search box |
+| **Vehicle** | Current-vehicle tools (repair, flip, doors, boost, jump, stop), protection options, never fall off bike, heavy car (just heavy / push / blow up), paint, and the vehicle spawner with category buttons and a search box |
 | **World** | Time, freeze time, weather, game speed, pedestrian and traffic density, mission timers |
 | **Teleport** | Your coordinates, teleport to coordinates, mission marker, radar blips list, saved locations |
-| **Cheats** | All 58 built-in game cheats, grouped (player, weapons, weather, vehicle spawns, vehicles, pedestrians, skins). Hover a button to see the original code |
+| **Active (N)** | Everything switched on right now, from the trainer and from game cheats, with a **Turn off** button on each and **Turn everything off** |
+| **Cheats** | All 58 built-in game cheats, grouped (player, weapons, weather, vehicle spawns, vehicles, pedestrians, skins). Cheats that stay on are **checkboxes**: tick to turn on, untick to turn off. One-off cheats are buttons. Hover anything to see the original code |
 | **Hotkeys** | Bind any feature to a key (see below) |
 | **Settings** | Mouse speed for the menu cursor, on-screen overlay, save settings |
 
 Tips:
+- **Turning game cheats off:** in the original game, typing a cheat again sometimes switches it off, but it always says "Cheat activated", and some cheats (green lights, aggressive/pink/black traffic, women follow you, media meter, fat/skinny) can never be switched off at all. The trainer reads each cheat's real switch inside the game, so the checkboxes always show the true state and unticking really turns it off. The only exceptions are *Peds riot* and *Peds attack you*: they overwrite the game's pedestrian tables, so undoing them needs a save reload.
+- **What's on?** The **Active** tab (its title shows the count) lists every trainer feature and game cheat currently on, plus locked weather, changed game speed and changed density. Tick **Settings → Active cheats list** to also show the list on screen while playing.
 - **Spawning:** pick a category, select a vehicle, press **Spawn** (or double-click it). With *Put me in it* ticked you start in the driver's seat. Boats appear in front of you, so stand near water. Trains, the police helicopter and the Dodo aren't listed because the player can't drive them.
 - **Teleport to mission marker** picks the first objective blip on the radar. The **All radar blips** list lets you choose any blip; map icons show as a number.
 - **Saved locations** are stored in `VCTrainer_positions.txt`, one per line (`x y z name`), so you can edit or share them.
 - **Repair** restores health, engine and tyres. Body dents stay, the same as the game's own repair cheat.
+- **Heavy car** only reacts while you're moving faster than about 5 km/h, and to each car at most once every 1.5 s. Your car's normal weight comes back when you turn it off, get out or switch cars. With *Blow it up*, also tick **Car god mode** and **Explosion proof**, because the blasts can hurt you.
+- **Never fall off bike:** if you ever end up stuck on a bike, hold the exit key for 1.5 s to be taken off. A bike that's blown up, or you dying, still ends the ride.
 
 ### Hotkeys
 
@@ -249,7 +259,7 @@ it expects; if they don't match (another version), nothing is patched.
 | `CGame::Process` → `CPad::UpdatePads` (0x4A4412) | call redirected | Right after the game reads input: while the menu is open, the mouse movement is fed to ImGui and the game's pad and mouse state are blanked, so the player, camera and weapons ignore input. |
 | `IDirect3DDevice8::Present` | vtable entry | Draws the ImGui menu and overlay on top of the finished frame. |
 | Game window procedure | subclassed | Menu toggle key, keyboard and text input for ImGui, and hotkey capture. |
-| `CBike::KnockOffRider` (0x613920) | inline jump + trampoline | *Never fall off bike*: when the rider is the player, the call returns without throwing them off. |
+| `CBike::KnockOffRider` (0x613920) | inline jump + trampoline | *Never fall off bike*: the game finishes the fall normally (skipping it left the player half-off and stuck), then the trainer seats the player back on the bike next frame with `CPed::WarpPedIntoCar`. |
 
 ### 3. Drawing ImGui on Direct3D 8
 
@@ -288,6 +298,8 @@ Most features use the game's own code rather than reimplementing it:
   the camera's look direction, after the game's physics, and re-files the entity in the world's
   sector lists so it keeps rendering wherever it goes. That's why it ignores walls and gravity.
 - **Mission timers** are frozen by preventing the on-screen countdown's script variable from decreasing.
+- **Heavy car** sets your car's mass and turn mass to the Rhino's (18,000 kg, from `handling.cfg`), so the game's own collision physics does the shoving. Contact with other cars is checked in your car's frame of reference; *push* sets the other car's velocity away from you, *blow up* calls the vehicle's own `BlowUpCar`, like the BIGBANG cheat.
+- **Bike exit in mid-air:** if you press exit and the game doesn't start getting you off within 0.2 s (it refuses while airborne), the trainer calls the game's knock-off routine itself. It respects the game's *player controls disabled* flag, so cutscenes aren't affected.
 - **Camera** is put straight behind the player with the game's own
   `CCamera::SetCameraDirectlyBehindForFollowPed` when the menu opens.
 

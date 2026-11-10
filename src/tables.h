@@ -16,6 +16,33 @@ inline const WeaponGroup kWeapons[] = {
     { "Other",    { {36,"Camera",100} } },
 };
 
+// Native cheats that leave a switch behind, found in the code each cheat runs
+// inside CPad::AddToPCCheatString. Kind: 0 = byte flag the game flips each time
+// the code is typed, 1 = byte flag the game only ever sets, 2 = dword flag the
+// game only ever sets, 3 = player body-size float (normal = 1.0).
+struct CheatFlag { const char* code; unsigned addr; int kind; };
+inline const CheatFlag kCheatFlags[] = {
+    { "LIFEISPASSINGMEBY",          0xA10B87, 0 },   // fast clock
+    { "OURGODGIVENRIGHTTOBEARARMS", 0xA10AB3, 0 },   // peds carry weapons
+    { "WHEELSAREALLINEED",          0xA10B30, 0 },   // only wheels visible
+    { "COMEFLYWITHME",              0xA10B28, 0 },   // flying cars
+    { "GRIPISEVERYTHING",           0xA10B0F, 0 },   // better handling
+    { "SEAWAYS",                    0xA10B81, 0 },   // cars drive on water
+    { "AIRSHIP",                    0xA10B11, 0 },   // flying boats
+    { "CERTAINDEATH",               0xA10B23, 0 },   // cigar
+    { "GREENLIGHT",                 0xA10ADC, 1 },   // all lights green
+    { "MIAMITRAFFIC",               0xA10B47, 1 },   // aggressive traffic
+    { "AHAIRDRESSERSCAR",           0xA10B26, 1 },   // pink traffic
+    { "IWANTITPAINTEDBLACK",        0xA10B82, 1 },   // black traffic
+    { "FANNYMAGNET",                0xA10B5F, 1 },   // women follow you
+    { "CHASESTAT",                  0x97F2C4, 2 },   // media level meter
+    { "DEEPFRIEDMARSBARS",          0x68E058, 3 },   // fat player
+    { "PROGRAMMER",                 0x68E058, 3 },   // skinny player
+};
+// These rewrite every pedestrian group's hostility table; the old values are
+// lost, so the trainer can't switch them off (reloading the save does).
+inline const char* const kOneWayCheats[] = { "FIGHTFIGHTFIGHT", "NOBODYLIKESME" };
+
 // Codes decoded from CPad::AddToPCCheatString in this exe; running one feeds it
 // to the game exactly as if it had been typed.
 struct NativeCheat { const char* code; const char* desc; };
