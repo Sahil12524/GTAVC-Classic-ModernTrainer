@@ -303,7 +303,7 @@ The release DLL is all most people need. To build it yourself:
    ```
 2. Clone with the Dear ImGui submodule:
    ```
-   git clone --recurse-submodules https://github.com/<your-account>/GTAVC-Classic-ModernTrainer.git
+   git clone --recurse-submodules https://github.com/Sahil12524/GTAVC-Classic-ModernTrainer.git
    ```
    (Already cloned without it? Run `git submodule update --init`.)
 3. Run `build.bat`. It produces `dinput8.dll` in the project folder.
