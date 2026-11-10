@@ -120,7 +120,10 @@ constexpr int PED_WANTED = 0x5F4, WANTED_LEVEL = 0x20;
 constexpr int VEH_COLOR1 = 0x1A0, VEH_COLOR2 = 0x1A1;  // opcode 0229
 constexpr int VEH_HEALTH = 0x204, VEH_DOORLOCK = 0x230, VEH_TYPE = 0x29C, VEH_DAMAGE = 0x2A0;
 constexpr int MI_VEHTYPE = 0x3C;    // CVehicleModelInfo: 0 car, 1 boat, 5 bike
-constexpr int WI_FIRETYPE = 0x00, WI_CLIP = 0x10, WI_MODEL = 0x58, WI_MODEL2 = 0x5C;
+// CWeaponInfo (stride 0x64): model +0x54 and model2 +0x58 as read by
+// CPed::GiveWeapon / CWeapon::Shutdown (0x5D4C90), slot +0x60. -1 = none.
+constexpr int WI_FIRETYPE = 0x00, WI_CLIP = 0x10, WI_MODEL = 0x54, WI_MODEL2 = 0x58;
+constexpr int MODEL_COUNT = 0x1964;   // RequestModel's own bound check
 
 // ---- hook sites ------------------------------------------------------------
 constexpr DWORD HOOK_PROCESS_SITE = 0x4A5DA0, GAME_PROCESS = 0x4A4410; // main loop -> CGame::Process

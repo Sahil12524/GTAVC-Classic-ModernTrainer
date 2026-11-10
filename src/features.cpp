@@ -88,10 +88,17 @@ void SetMoney(int amount) { *Money = ClampMoney(amount); }
 void GiveWeapon(int type, int ammo) {
     void* ped = PlayerPed(); if (!ped) return;
     char* info = GetWeaponInfo(type);
-    int m1 = *(int*)(info + WI_MODEL), m2 = *(int*)(info + WI_MODEL2);
-    if (m1 > 0) RequestModel(m1, 1);
-    if (m2 > 0) RequestModel(m2, 1);
+    int models[2] = { *(int*)(info + WI_MODEL), *(int*)(info + WI_MODEL2) };
+    for (int m : models) if (m > 0 && m < MODEL_COUNT) RequestModel(m, 1);
     LoadAllRequested(false);
+    // Never hand over a weapon whose model isn't in memory: the ped builds the
+    // weapon object from it straight away and that would crash.
+    for (int m : models) {
+        if (m > 0 && m < MODEL_COUNT && StreamInfo[m * 20] != 1) {   // 1 = LOADED
+            ShowNative("Weapon model not loaded, try again");
+            return;
+        }
+    }
     game::GiveWeapon(ped, type, ammo, true);
 }
 
