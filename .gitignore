@@ -1,0 +1,11 @@
+# build output (published as a GitHub Release instead)
+*.dll
+*.pdb
+*.lib
+*.exp
+*.obj
+
+# files the trainer writes when run from this folder
+VCTrainer.ini
+VCTrainer_layout.ini
+VCTrainer_positions.txt
