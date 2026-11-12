@@ -12,11 +12,39 @@ struct Settings {
     bool enabled = true;      // master switch: when off, every continuous cheat pauses
     // player
     bool godMode = false, infiniteArmour = false, neverWanted = false;
+    bool wantedCapOn = false;     // the wanted level never goes above wantedCap
+    int  wantedCap = 2;           // 0-6 stars
+    int  maxHealth = 0, maxArmour = 0;   // chosen max health/armour, 0 = game's own
     bool infiniteAmmo = false, noReload = false;
     Proofs playerProofs;
     // vehicle
     bool carGodMode = false, autoRepair = false;
     bool heavyCar = false;
+    bool genocide = false;        // every ped and vehicle around dies / blows up
+    bool rapidFire = false;
+    bool noScopeSniper = false;   // sniper rifles fire from the hip with one click
+    bool sniperAuto = false;      // hold the button: sniper rifles keep firing at full speed
+    bool superJump = false;       // jumps go much higher
+    float superJumpPower = 3.0f;  // times a normal jump
+    bool superRun = false;        // run / sprint much faster on foot
+    bool autoBhop = false;        // hold jump: hop again the moment you land, gaining speed
+    int  bhopMode = 0;            // 0 any direction, 1 AFH (forward), 2 ABH (backward)
+    float bhopGain = 1.0f;        // speed kept x this each hop (1 = CS:GO)
+    float bhopMax = 89.0f;        // top hop speed, m/s (CS:GO sv_maxvelocity 3500 u/s)
+    float bhopHeight = 1.45f;     // hop height, metres (CS:GO: 57 units)
+    bool bhopSurf = true;         // slide along steep ramps like CS:GO surf
+    bool noLandingRoll = false;   // no roll / crouch / get-up when landing from a fall
+    float superRunSpeed = 2.5f;   // times normal speed       // guns fire as fast as the button allows
+    bool noRagdoll = false;       // the player is never knocked over
+    bool wallBang = false;        // shots go through walls, cars, wrecks
+    bool oneShotVehicles = false; // any vehicle shot is destroyed (tanks, helicopters...)
+    bool enemyEsp = false;    // mark every hostile ped on screen, walls or not
+    bool aimLock = false;     // aiming near an enemy who wants the player dead: crosshair locks on
+    bool touchKill = false;   // peds die the moment the player (or the player's vehicle) touches them
+    bool autoLock = false;    // lock doors on getting in (cars with doors), unlock on getting out
+    bool autoFlip = false;    // cars only: turn back over when resting on the roof
+    bool surviveBlowUp = true; // vehicle explodes with the player inside: the player lives
+    int  blowUpMode = 0;       // 0 stay in the wreck, 1 thrown clear beside it
     int  heavyMode = 1;       // what touching another car does: 0 heavy only, 1 push far away, 2 blow up
     Proofs carProofs;
     bool neverTired = false, fastReload = false, stayOnBike = false;
@@ -70,6 +98,7 @@ bool  GetPlayerPos(float out[3]);
 // player
 void SetMaxHealth(int v);
 void SetMaxArmour(int v);
+void KillPlayer();                    // suicide that works through god mode, proofs, vehicles
 void SetHealth(float v);
 void SetArmour(float v);
 void SetWanted(int level);
@@ -106,10 +135,21 @@ void ReleaseWeather();
 struct SavedPos { std::string name; float x, y, z; };
 std::vector<SavedPos>& SavedPositions();
 void SavePositions();
-void TeleportTo(float x, float y, float z, bool findGround);
+void TeleportTo(float x, float y, float z, bool findGround, bool clearSpace = true,
+                void* ignore = nullptr, const float* heading = nullptr);
 struct Blip { int index, type, sprite; float pos[3]; };
 std::vector<Blip> ActiveBlips();             // radar blips with a resolvable position
-bool TeleportToMarker();                     // first mission marker (no icon), else any blip
+bool TeleportToMarker();
+struct EnemyMark {
+    bool onScreen, visible, locked;
+    float x, top, bottom;     // screen pixels (game resolution) when on screen
+    float dirX, dirY;         // off screen: right / ahead of the camera, metres
+    float dist;
+};
+std::vector<EnemyMark> EnemyMarks();           // empty unless "show enemies" is on
+struct Pickup { int index, model; float pos[3]; };
+std::vector<Pickup> ActivePickups();           // pickups lying in the world (packages, rampages, ...)
+void TeleportToPickup(const Pickup& p);                     // first mission marker (no icon), else any blip
 void TeleportToBlip(const Blip& b);
 
 // native cheats
