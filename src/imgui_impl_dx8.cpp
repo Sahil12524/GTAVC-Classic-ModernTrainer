@@ -8,6 +8,7 @@
 #include "imgui_impl_dx8.h"
 #include <d3d8.h>
 #include <vector>
+#include <string.h>
 
 struct Dx8Vertex { float x, y, z; D3DCOLOR col; float u, v; };
 static const DWORD kFVF = D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1;
@@ -53,6 +54,21 @@ void ImGui_ImplDX8_Shutdown() {
 
 void ImGui_ImplDX8_NewFrame() {
     if (!g_fontTex) CreateFontTexture();
+}
+
+static bool Readable(const void* p, size_t n) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!p || !VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    return (const char*)p + n <= (const char*)mbi.BaseAddress + mbi.RegionSize;
+}
+
+// Only memory reads, no calls: p counts as a texture when it is the same kind
+// of object as our own font texture (same vtable), i.e. a texture made by
+// this device - whether that is the real d3d8 or a wrapper such as VCModernFix.
+bool ImGui_ImplDX8_IsTexture(void* p) {
+    if (!g_dev || !g_fontTex || !Readable(p, 4)) return false;
+    return *(void**)p == *(void**)g_fontTex;
 }
 
 static void SetupRenderState() {

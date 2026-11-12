@@ -1,6 +1,11 @@
-// dinput8.dll proxy: forwards DirectInput8Create to the real system DLL and
-// installs the trainer hooks when the game loads us.
+// One DLL, two ways to load it:
+//  * VCTrainer.asi - loaded by Ultimate ASI Loader (or any ASI loader) next to
+//    CLEO, SilentPatch and other mods. The DirectInput8Create export below is
+//    simply unused in that case.
+//  * dinput8.dll   - standalone, when no ASI loader is installed: the game loads
+//    it in place of the system dinput8.dll and every call is forwarded.
 #include <windows.h>
+#include <stdio.h>
 #include "trainer.h"
 
 typedef HRESULT (WINAPI* DI8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
@@ -21,12 +26,22 @@ extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE inst, DWORD ver, REFIID i
     return real(inst, ver, iid, out, outer);
 }
 
+// Only one copy of the trainer may hook the game, even if it is installed
+// twice (e.g. VCTrainer.asi and an old dinput8.dll copy of it).
+static bool FirstInstance() {
+    char name[64];
+    sprintf(name, "Local\\VCTrainer.%lu", GetCurrentProcessId());
+    HANDLE m = CreateMutexA(nullptr, FALSE, name);   // kept open for the process lifetime
+    return m && GetLastError() != ERROR_ALREADY_EXISTS;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+        if (!FirstInstance()) return TRUE;           // another copy is already running
         if (!InstallHooks())
-            MessageBoxA(nullptr, "VC Trainer: this gta-vc.exe is not v1.0. The trainer is disabled.",
-                        "VC Trainer", MB_ICONWARNING);
+            MessageBoxA(nullptr, "Modern VC Trainer: this gta-vc.exe is not v1.0. The trainer is disabled.",
+                        "Modern VC Trainer", MB_ICONWARNING);
     }
     return TRUE;
 }

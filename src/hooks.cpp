@@ -33,16 +33,39 @@ static bool  g_mouseBtn[3];
 static float g_wheel;
 
 // ----------------------------------------------------------------- code patching
-static bool PatchCall(DWORD site, DWORD expectedTarget, void* newTarget) {
-    unsigned char* p = (unsigned char*)site;
-    if (p[0] != 0xE8 || site + 5 + *(int*)(p + 1) != expectedTarget) return false;
+// Mod compatibility: every hook chains. A call site another mod (CLEO,
+// SilentPatch, ...) has already redirected keeps working: we call whatever the
+// site pointed to before us, which ends in the game's own function.
+static void WriteRel32(unsigned char* p, unsigned char op, DWORD target) {
     DWORD old;
     VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
-    *(int*)(p + 1) = (int)((DWORD)newTarget - (site + 5));
+    p[0] = op;
+    *(int*)(p + 1) = (int)(target - ((DWORD)p + 5));
     VirtualProtect(p, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p, 5);
-    return true;
 }
+
+// Redirects the E8 call at site to newTarget; returns the previous target (the
+// game's function or another mod's hook), or 0 if the site isn't a call.
+static DWORD ChainCall(DWORD site, void* newTarget) {
+    unsigned char* p = (unsigned char*)site;
+    if (p[0] != 0xE8) return 0;
+    DWORD prev = site + 5 + *(int*)(p + 1);
+    WriteRel32(p, 0xE8, (DWORD)newTarget);
+    return prev;
+}
+
+// gta-vc.exe v1.0 (3,088,896 bytes): checked by the PE header build stamp, so
+// it still matches after other mods have patched code.
+static bool IsVC10() {
+    char* base = (char*)GetModuleHandleA(nullptr);
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    return nt->FileHeader.TimeDateStamp == 0x504D6947 && base == (char*)0x400000;
+}
+
+typedef void (__cdecl* VoidFn)();
+static VoidFn g_nextGameProcess = (VoidFn)GAME_PROCESS;
+static VoidFn g_nextUpdatePads  = (VoidFn)UPDATE_PADS;
 
 // ----------------------------------------------------------------- keyboard
 static ImGuiKey VkToImGuiKey(WPARAM vk) {
@@ -178,7 +201,7 @@ static void HookDevice(IDirect3DDevice8* dev) {
 
 // ----------------------------------------------------------------- game hooks
 static void __cdecl HookedUpdatePads() {
-    ((void(__cdecl*)())UPDATE_PADS)();
+    g_nextUpdatePads();
     if (!g_menuOpen) {
         // Fly mode uses WASD/Space/Ctrl/Shift itself: stop the game from also
         // walking, jumping or firing on them. Mouse look is left alone.
@@ -209,14 +232,40 @@ static KnockOff_t g_origKnockOff = nullptr;
 
 // __fastcall with an unused edx matches the game's __thiscall (bike in ecx,
 // callee pops the 4 stack arguments).
-// "Never fall off bike" does NOT skip the knock-off: many callers have already
-// changed the ped/bike state before calling it, so skipping it left the player
-// half-off (stuck on the bike, unable to exit or enter anything). The game now
-// finishes the knock-off normally and the trainer seats the player back on the
-// bike next frame (BikeKnockedOff / StayOnBikeTick in features.cpp).
+// "Never fall off bike" skips the knock-off only where that is safe: an older
+// version skipped every call and left the player half-off (stuck on the bike)
+// because some callers - the carjack/drag paths - set the ped as already being
+// pulled off before calling. The crash sites below change nothing before the
+// call (checked in the v1.0 code), so skipping them just keeps the player on.
+//
+// Every place the game calls KnockOffRider (v1.0 call sites), by why:
+//  crashes / falls / hits - blocked outright, so the player simply stays on:
+//    0x60A197 0x60A1AF  CBike collision, RAMMEDBYCAR
+//    0x614C6B 0x614CE0  bike hitting / hit by something, RAMMEDBYCAR
+//    0x522C17 0x522C2F 0x522D33 0x522D4B  rider's own fall check, FALL
+//    0x526960           CPed::InflictDamage (shot, run into)
+//    0x5D31E2           melee hit
+//  a ped taking the bike - always allowed, never undone:
+//    0x5169C1 0x516BEE  CPed being dragged off by a carjacker / cop
+//    0x5009E9           ped animation event (jack sequence)
+//  bike sinking - 0x6137D3 0x6138A0 (DROWNING) - allowed, never undone.
+// Anything else (another mod, an unknown path) falls back to the old way:
+// the knock-off runs and the player is put back on next frame.
+static bool CalledFrom(const DWORD* sites, int n, DWORD ret) {
+    for (int i = 0; i < n; i++) if (ret == sites[i] + 5) return true;
+    return false;
+}
+static const DWORD kCrashSites[] = { 0x60A197, 0x60A1AF, 0x614C6B, 0x614CE0, 0x522C17, 0x522C2F,
+                                     0x522D33, 0x522D4B, 0x526960, 0x5D31E2 };
+static const DWORD kLetGoSites[] = { 0x5169C1, 0x516BEE, 0x5009E9, 0x6137D3, 0x6138A0 };
+
 static void* __fastcall HookedKnockOffRider(void* bike, void*, int weapon, int dir, void* ped, bool getBackOn) {
+    DWORD ret = (DWORD)__builtin_return_address(0);
     bool player = ped && ped == FindPlayerPed();
-    if (player && Active().stayOnBike) BikeKnockedOff(bike);   // remembers speed before the fall
+    if (player && Active().stayOnBike && !BikeExitRequested()) {
+        if (CalledFrom(kCrashSites, 10, ret)) return nullptr;    // stay on: no fall, no damage
+        if (!CalledFrom(kLetGoSites, 5, ret)) BikeKnockedOff(bike);  // unknown: re-seat after
+    }
     return g_origKnockOff(bike, weapon, dir, ped, getBackOn);
 }
 
@@ -228,9 +277,15 @@ void ForceOffBike(void* bike, void* ped) {
 
 static bool HookKnockOffRider() {
     unsigned char* fn = (unsigned char*)KNOCK_OFF_RIDER;
+    // Another mod already put a jump here: chain to it instead of a trampoline.
+    if (fn[0] == 0xE9) {
+        g_origKnockOff = (KnockOff_t)((DWORD)fn + 5 + *(int*)(fn + 1));
+        WriteRel32(fn, 0xE9, (DWORD)&HookedKnockOffRider);
+        return true;
+    }
     // expected prologue: 53 56 57 55 81 EC D0 00 00 00
     const unsigned char expect[KNOCK_OFF_PROLOGUE] = { 0x53, 0x56, 0x57, 0x55, 0x81, 0xEC, 0xD0, 0x00, 0x00, 0x00 };
-    if (memcmp(fn, expect, KNOCK_OFF_PROLOGUE) != 0) return false;
+    if (memcmp(fn, expect, KNOCK_OFF_PROLOGUE) != 0) return false;   // changed in an unknown way: skip
 
     // trampoline = original prologue + jump back into the function
     unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -250,8 +305,190 @@ static bool HookKnockOffRider() {
     return true;
 }
 
+// ---------------------------------------------------------------- wanted hook
+// CWanted::UpdateWantedLevel (0x4D2110) turns the "chaos" points into stars
+// and is run by everything that changes the wanted level: crimes, scripts,
+// cheats, SetWantedLevel. Clearing once per frame left whatever was added
+// later in the frame in effect (stars came back, cops still busted). Here the
+// player's chaos is zeroed every time the stars are worked out, so with never
+// wanted on (or right after Clear) no star can appear at all. The game's
+// maximum-wanted globals are not touched: they end up in save games.
+typedef void (__thiscall* UpdWanted_t)(void* wanted);
+static UpdWanted_t g_origUpdWanted = nullptr;
+
+static void __fastcall HookedUpdateWantedLevel(void* wanted, void*) {
+    bool hold = false;
+    if (wanted && HoldNoWanted()) {
+        void* ped = FindPlayerPed();
+        if (ped && at<void*>(ped, PED_WANTED) == wanted) { *(int*)wanted = 0; hold = true; }   // m_nChaos
+    }
+    g_origUpdWanted(wanted);
+    // Wanted level lock: the stars just worked out may not go past the
+    // player's chosen maximum (SetWantedLevel also resets the chaos to match,
+    // and its own call back in here then finds the level within the limit).
+    if (wanted && !hold) {
+        int cap = WantedCap();
+        void* ped = FindPlayerPed();
+        if (cap >= 0 && ped && at<void*>(ped, PED_WANTED) == wanted && at<int>(wanted, WANTED_LEVEL) > cap)
+            SetWantedLevel(wanted, cap);
+    }
+    // (Raising m_MaximumLawEnforcerVehicles here for more patrol cars was
+    // tried and removed: the game sends those cars to the player and the
+    // cops get out, even at zero stars.)
+    (void)hold;
+}
+
+static bool HookUpdateWantedLevel() {
+    unsigned char* fn = (unsigned char*)0x4D2110;
+    if (fn[0] == 0xE9) {                     // another mod's jump: chain to it
+        g_origUpdWanted = (UpdWanted_t)((DWORD)fn + 5 + *(int*)(fn + 1));
+        WriteRel32(fn, 0xE9, (DWORD)&HookedUpdateWantedLevel);
+        return true;
+    }
+    // expected: 8B 15 DC 10 69 00 (mov edx, [MaximumChaosLevel]) - position-independent
+    const unsigned char expect[6] = { 0x8B, 0x15, 0xDC, 0x10, 0x69, 0x00 };
+    if (memcmp(fn, expect, 6) != 0) return false;
+    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(tramp, fn, 6);
+    tramp[6] = 0xE9;
+    *(int*)(tramp + 7) = (int)((DWORD)fn + 6 - ((DWORD)tramp + 11));
+    g_origUpdWanted = (UpdWanted_t)tramp;
+    DWORD old;
+    VirtualProtect(fn, 6, PAGE_EXECUTE_READWRITE, &old);
+    fn[0] = 0xE9;
+    *(int*)(fn + 1) = (int)((DWORD)&HookedUpdateWantedLevel - ((DWORD)fn + 5));
+    fn[5] = 0x90;
+    VirtualProtect(fn, 6, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 6);
+    return true;
+}
+
+// CPed::SetArrestPlayer (0x4EB5F0, cop = this, the suspect as argument): every
+// bust goes through it - on foot, or a cop opening the car door and pulling
+// the player out. A cop already on its way when the stars were cleared still
+// got here, so the arrest itself is refused while never wanted holds.
+typedef void (__thiscall* Arrest_t)(void* cop, void* suspect);
+static Arrest_t g_origArrest = nullptr;
+
+static void __fastcall HookedSetArrestPlayer(void* cop, void*, void* suspect) {
+    if (suspect && suspect == FindPlayerPed() && HoldNoWanted()) return;
+    g_origArrest(cop, suspect);
+}
+
+static bool HookSetArrestPlayer() {
+    unsigned char* fn = (unsigned char*)0x4EB5F0;
+    if (fn[0] == 0xE9) {
+        g_origArrest = (Arrest_t)((DWORD)fn + 5 + *(int*)(fn + 1));
+        WriteRel32(fn, 0xE9, (DWORD)&HookedSetArrestPlayer);
+        return true;
+    }
+    // expected: 53 55 89 CD 8B 5C 24 0C (push ebx; push ebp; mov ebp,ecx; mov ebx,[esp+0C])
+    const unsigned char expect[8] = { 0x53, 0x55, 0x89, 0xCD, 0x8B, 0x5C, 0x24, 0x0C };
+    if (memcmp(fn, expect, 8) != 0) return false;
+    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(tramp, fn, 8);
+    tramp[8] = 0xE9;
+    *(int*)(tramp + 9) = (int)((DWORD)fn + 8 - ((DWORD)tramp + 13));
+    g_origArrest = (Arrest_t)tramp;
+    DWORD old;
+    VirtualProtect(fn, 8, PAGE_EXECUTE_READWRITE, &old);
+    fn[0] = 0xE9;
+    *(int*)(fn + 1) = (int)((DWORD)&HookedSetArrestPlayer - ((DWORD)fn + 5));
+    memset(fn + 5, 0x90, 3);
+    VirtualProtect(fn, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 8);
+    return true;
+}
+
+// CVehicle::KillPedsInVehicle (0x5B8560): run by every vehicle type's
+// BlowUpCar; kills whoever is inside with SetDead (no health/proofs check).
+// With "survive vehicle explosions" on, the player is taken out first.
+typedef void (__thiscall* KillPeds_t)(void* veh);
+static KillPeds_t g_origKillPeds = nullptr;
+
+static void __fastcall HookedKillPedsInVehicle(void* veh, void*) {
+    void** seat = nullptr;
+    void* who = nullptr;
+    if (veh && SurviveBlowUpOn()) {
+        if (BlowUpStayInside()) {
+            // The kill only looks at the seats: leave the player's seat empty
+            // just for that, then sit them straight back in the wreck.
+            if ((seat = PlayerSeatInBlast(veh))) { who = *seat; *seat = nullptr; }
+        } else {
+            EjectPlayerFromBlast(veh);
+        }
+    }
+    g_origKillPeds(veh);
+    if (seat) *seat = who;
+}
+
+static bool HookKillPedsInVehicle() {
+    unsigned char* fn = (unsigned char*)0x5B8560;
+    if (fn[0] == 0xE9) {
+        g_origKillPeds = (KillPeds_t)((DWORD)fn + 5 + *(int*)(fn + 1));
+        WriteRel32(fn, 0xE9, (DWORD)&HookedKillPedsInVehicle);
+        return true;
+    }
+    // expected: 53 89 CB 8B 83 A8 01 00 00 (push ebx; mov ebx,ecx; mov eax,[ebx+1A8])
+    const unsigned char expect[9] = { 0x53, 0x89, 0xCB, 0x8B, 0x83, 0xA8, 0x01, 0x00, 0x00 };
+    if (memcmp(fn, expect, 9) != 0) return false;
+    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(tramp, fn, 9);
+    tramp[9] = 0xE9;
+    *(int*)(tramp + 10) = (int)((DWORD)fn + 9 - ((DWORD)tramp + 14));
+    g_origKillPeds = (KillPeds_t)tramp;
+    DWORD old;
+    VirtualProtect(fn, 9, PAGE_EXECUTE_READWRITE, &old);
+    fn[0] = 0xE9;
+    *(int*)(fn + 1) = (int)((DWORD)&HookedKillPedsInVehicle - ((DWORD)fn + 5));
+    memset(fn + 5, 0x90, 4);
+    VirtualProtect(fn, 9, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 9);
+    return true;
+}
+
+// CPed::SetFall (0x4FD9F0, thiscall(extraTime, animId, evenIfNotInControl)):
+// every knock-down - hit by a car, blasted by an explosion, shoved, tripped -
+// starts here. With "no ragdoll" on, the player just isn't knocked over.
+typedef void (__thiscall* SetFall_t)(void* ped, int extraTime, int animId, bool evenIfNotInControl);
+static SetFall_t g_origSetFall = nullptr;
+
+static void __fastcall HookedSetFall(void* ped, void*, int extraTime, int animId, bool evenIfNotInControl) {
+    if (ped && ped == FindPlayerPed() && NoRagdollOn()) return;
+    g_origSetFall(ped, extraTime, animId, evenIfNotInControl);
+}
+
+static bool HookSetFall() {
+    unsigned char* fn = (unsigned char*)0x4FD9F0;
+    if (fn[0] == 0xE9) {
+        g_origSetFall = (SetFall_t)((DWORD)fn + 5 + *(int*)(fn + 1));
+        WriteRel32(fn, 0xE9, (DWORD)&HookedSetFall);
+        return true;
+    }
+    // expected: 53 56 57 55 89 CD (push ebx; push esi; push edi; push ebp; mov ebp,ecx)
+    const unsigned char expect[6] = { 0x53, 0x56, 0x57, 0x55, 0x89, 0xCD };
+    if (memcmp(fn, expect, 6) != 0) return false;
+    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(tramp, fn, 6);
+    tramp[6] = 0xE9;
+    *(int*)(tramp + 7) = (int)((DWORD)fn + 6 - ((DWORD)tramp + 11));
+    g_origSetFall = (SetFall_t)tramp;
+    DWORD old;
+    VirtualProtect(fn, 6, PAGE_EXECUTE_READWRITE, &old);
+    fn[0] = 0xE9;
+    *(int*)(fn + 1) = (int)((DWORD)&HookedSetFall - ((DWORD)fn + 5));
+    fn[5] = 0x90;
+    VirtualProtect(fn, 6, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 6);
+    return true;
+}
+
 static void __cdecl HookedGameProcess() {
-    ((void(__cdecl*)())GAME_PROCESS)();
+    g_nextGameProcess();
 
     // Menu just opened: swing the camera straight behind the player. The mouse
     // is blanked while the menu is open, so it then stays put.
@@ -265,15 +502,26 @@ static void __cdecl HookedGameProcess() {
     }
     if (!g_origWndProc && *GameWindow) {
         g_origWndProc = (WNDPROC)SetWindowLongA(*GameWindow, GWL_WNDPROC, (LONG)&HookedWndProc);
-        ShowNative("VC Trainer loaded. Press INSERT or F7 to open the menu.");
+        ShowNative("Modern VC Trainer loaded. Press INSERT or F7 to open the menu.");
     }
     TrainerTick();
 }
 
 bool InstallHooks() {
+    if (!IsVC10()) return false;
     LoadSettings();
-    if (!PatchCall(HOOK_PROCESS_SITE, GAME_PROCESS, (void*)&HookedGameProcess)) return false;
-    PatchCall(HOOK_PADS_SITE, UPDATE_PADS, (void*)&HookedUpdatePads);
+    DWORD prev = ChainCall(HOOK_PROCESS_SITE, (void*)&HookedGameProcess);
+    if (!prev) {
+        MessageBoxA(nullptr, "Modern VC Trainer: another mod has replaced the game's main-loop call, "
+                    "so the trainer can't start.", "Modern VC Trainer", MB_ICONWARNING);
+        return true;   // the version is fine; don't also show the version warning
+    }
+    g_nextGameProcess = (VoidFn)prev;
+    if (DWORD p = ChainCall(HOOK_PADS_SITE, (void*)&HookedUpdatePads)) g_nextUpdatePads = (VoidFn)p;
     HookKnockOffRider();
+    HookUpdateWantedLevel();
+    HookSetArrestPlayer();
+    HookKillPedsInVehicle();
+    HookSetFall();
     return true;
 }
