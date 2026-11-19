@@ -14,6 +14,8 @@
 #include <d3d8.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 using namespace game;
 
@@ -55,6 +57,93 @@ static DWORD ChainCall(DWORD site, void* newTarget) {
     return prev;
 }
 
+// ---- what became of each hook: for VCTrainer.log and the start-up message
+enum HookState { HOOK_INSTALLED, HOOK_CHAINED, HOOK_CHANGED, HOOK_NO_MEMORY, HOOK_NOT_A_CALL };
+struct HookRecord {
+    const char* name; const char* feature; DWORD at;
+    HookState state; unsigned char found[10]; int len; DWORD next;
+    DWORD own;   // a call site: the game's own function it calls in v1.0 (0 = the main-loop / pads sites)
+};
+static const int kMaxHooks = 32;
+static HookRecord g_hookLog[kMaxHooks];
+static int g_hookCount = 0;
+
+static void HexBytes(const unsigned char* b, int n, char* out) {
+    out[0] = 0;
+    for (int i = 0; i < n; i++) sprintf(out + i * 3, i ? " %02X" : "%02X", b[i]);
+}
+
+static HookRecord& NewRecord(const char* name, const char* feature, DWORD at, int len) {
+    HookRecord& r = g_hookLog[g_hookCount < kMaxHooks ? g_hookCount++ : kMaxHooks - 1];
+    r = HookRecord{ name, feature, at, HOOK_INSTALLED, {}, len, 0, 0 };
+    memcpy(r.found, (const void*)at, len);
+    return r;
+}
+
+static void LogHook(const HookRecord& r, const unsigned char* expect) {
+    char found[40], want[40];
+    HexBytes(r.found, r.len, found);
+    switch (r.state) {
+    case HOOK_INSTALLED:
+        if (expect) Log("Hook %s (0x%06X): installed (bytes %s, as v1.0)", r.name, r.at, found);
+        else if (r.own) Log("Hook %s (0x%06X): installed (bytes %s), calls on to 0x%06X%s", r.name, r.at, found, r.next,
+                            r.next == r.own ? " (the game's own)" : " (another mod's hook)");
+        else Log("Hook %s (0x%06X): installed, calls on to 0x%06X%s", r.name, r.at, r.next,
+                 r.next == (r.at == HOOK_PROCESS_SITE ? GAME_PROCESS : UPDATE_PADS) ? " (the game's own)" : " (another mod's hook)");
+        break;
+    case HOOK_CHAINED:
+        Log("Hook %s (0x%06X): installed through another mod's jump there (to 0x%06X), which is called on", r.name, r.at, r.next);
+        break;
+    case HOOK_CHANGED:
+        HexBytes(expect, r.len, want);
+        Log("Hook %s (0x%06X): NOT installed - found %s, v1.0 has %s (another mod changed it). Not working: %s",
+            r.name, r.at, found, want, r.feature);
+        break;
+    case HOOK_NO_MEMORY:
+        Log("Hook %s (0x%06X): NOT installed - no memory for its trampoline. Not working: %s", r.name, r.at, r.feature);
+        break;
+    case HOOK_NOT_A_CALL:
+        Log("Hook %s (0x%06X): NOT installed - found %s, not a call (another mod replaced it). Not working: %s",
+            r.name, r.at, found, r.feature);
+        break;
+    }
+}
+
+// Puts a jump to `hook` over the first `len` bytes of a game function and
+// returns the way to call the original through *orig: a trampoline with those
+// bytes and a jump back. Another mod's jump already there (E9) is chained to
+// instead. Anything else changed in those bytes - another mod's inline patch -
+// and the hook is left out, so nothing half-patched is ever run.
+static bool PrologueHook(const char* name, const char* feature, DWORD at, const unsigned char* expect, int len,
+                         void* hook, void** orig) {
+    unsigned char* fn = (unsigned char*)at;
+    HookRecord& r = NewRecord(name, feature, at, len);
+    if (fn[0] == 0xE9) {                                   // another mod's jump: chain to it
+        r.next = at + 5 + *(int*)(fn + 1);
+        *orig = (void*)r.next;
+        WriteRel32(fn, 0xE9, (DWORD)hook);
+        r.state = HOOK_CHAINED;
+        LogHook(r, expect);
+        return true;
+    }
+    if (memcmp(fn, expect, len) != 0) { r.state = HOOK_CHANGED; LogHook(r, expect); return false; }
+    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) { r.state = HOOK_NO_MEMORY; LogHook(r, expect); return false; }
+    memcpy(tramp, fn, len);                                // the checked bytes: whole instructions, none relative
+    tramp[len] = 0xE9;
+    *(int*)(tramp + len + 1) = (int)((DWORD)fn + len - ((DWORD)tramp + len + 5));
+    *orig = tramp;
+    DWORD old;
+    VirtualProtect(fn, len, PAGE_EXECUTE_READWRITE, &old);
+    fn[0] = 0xE9;
+    *(int*)(fn + 1) = (int)((DWORD)hook - ((DWORD)fn + 5));
+    memset(fn + 5, 0x90, len - 5);
+    VirtualProtect(fn, len, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, len);
+    LogHook(r, expect);
+    return true;
+}
+
 // gta-vc.exe v1.0 (3,088,896 bytes): checked by the PE header build stamp, so
 // it still matches after other mods have patched code.
 static bool IsVC10() {
@@ -80,6 +169,10 @@ static ImGuiKey VkToImGuiKey(WPARAM vk) {
     case VK_OEM_MINUS: return ImGuiKey_Minus;   case VK_OEM_PERIOD: return ImGuiKey_Period;
     case VK_CONTROL: return ImGuiKey_LeftCtrl;  case VK_SHIFT: return ImGuiKey_LeftShift;
     case VK_MENU: return ImGuiKey_LeftAlt;
+    case VK_NUMPAD0: return ImGuiKey_Keypad0;   case VK_NUMPAD2: return ImGuiKey_Keypad2;
+    case VK_NUMPAD4: return ImGuiKey_Keypad4;   case VK_NUMPAD5: return ImGuiKey_Keypad5;
+    case VK_NUMPAD6: return ImGuiKey_Keypad6;   case VK_NUMPAD8: return ImGuiKey_Keypad8;
+    case VK_NUMPAD9: return ImGuiKey_Keypad9;   case VK_NUMPAD3: return ImGuiKey_Keypad3;
     }
     if (vk >= '0' && vk <= '9') return (ImGuiKey)(ImGuiKey_0 + (vk - '0'));
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -116,6 +209,13 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_menuOpen) SaveSettings();
         return 0;
     }
+    // Every key press (not auto-repeat) is remembered with the modifiers held
+    // at that moment; the next tick runs its hotkey even if the key is already
+    // up again (a tap shorter than a tick).
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && !(lp & (1 << 30)))
+        NoteKeyPress((int)wp, ((GetKeyState(VK_CONTROL) & 0x8000) ? HKMOD_CTRL : 0) |
+                              ((GetKeyState(VK_SHIFT) & 0x8000) ? HKMOD_SHIFT : 0) |
+                              ((GetKeyState(VK_MENU) & 0x8000) ? HKMOD_ALT : 0));
     if (g_imguiReady && g_menuOpen) {
         ImGuiIO& io = ImGui::GetIO();
         switch (msg) {
@@ -140,17 +240,49 @@ static LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 static void InitImGui(IDirect3DDevice8* dev) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = "VCTrainer_layout.ini";
+    static char layoutIni[MAX_PATH];
+    GamePath(layoutIni, "VCTrainer_layout.ini");     // the game folder, whatever the working directory
+    io.IniFilename = layoutIni;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.MouseDrawCursor = true; // the game hides the OS cursor
     ApplyTrainerStyle();
+    LoadUiFonts();
     ImGui_ImplDX8_Init(dev);
     g_imguiReady = true;
 }
 
+// The trainer's own cost per drawn frame (everything below up to the game's
+// Present), averaged and written to the log once a minute while the enemy
+// markers are on, with what the markers' scan cost on the tick.
+static void FrameTiming(LONGLONG spent) {
+    static LARGE_INTEGER freq;
+    static LONGLONG total = 0, windowStart = 0, maxSpent = 0;
+    static int frames = 0;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    bool esp = S.enabled && S.enemyEsp;
+    if (!esp) { frames = 0; total = maxSpent = 0; windowStart = now.QuadPart; return; }
+    if (!windowStart) windowStart = now.QuadPart;
+    total += spent; frames++;
+    if (spent > maxSpent) maxSpent = spent;
+    double secs = (double)(now.QuadPart - windowStart) / (double)freq.QuadPart;
+    if (secs < 60.0) return;
+    double scanMs = 0; int scans = 0, marks = 0;
+    TakeEspScanStats(&scanMs, &scans, &marks);
+    double avgMs = frames ? (double)total * 1000.0 / (double)freq.QuadPart / frames : 0.0;
+    Log("Timing: trainer's part of Present %.3f ms per frame (max %.3f) over %d frames, %.0f FPS, menu %s, overlay %s; "
+        "ESP scan on the tick %.3f ms x %d (%.1f enemies marked)",
+        avgMs, (double)maxSpent * 1000.0 / (double)freq.QuadPart, frames, frames / secs,
+        g_menuOpen ? "open" : "closed", OverlayEnabled() ? "on" : "off",
+        scans ? scanMs / scans : 0.0, scans, scans ? (double)marks / scans : 0.0);
+    frames = 0; total = maxSpent = 0; windowStart = now.QuadPart;
+}
+
 static HRESULT __stdcall HookedPresent(IDirect3DDevice8* dev, const RECT* src, const RECT* dst,
                                        HWND wnd, const RGNDATA* dirty) {
-    if (g_imguiReady && (g_menuOpen || OverlayEnabled()) && dev->TestCooperativeLevel() == D3D_OK) {
+    LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
+    PollMouseHotkeys();                               // mouse-button hotkeys: every drawn frame
+    if (g_imguiReady && (g_menuOpen || AnyOverlayOn()) && dev->TestCooperativeLevel() == D3D_OK) {
         static LARGE_INTEGER freq, last;
         LARGE_INTEGER now; QueryPerformanceCounter(&now);
         if (!freq.QuadPart) { QueryPerformanceFrequency(&freq); last = now; }
@@ -176,6 +308,7 @@ static HRESULT __stdcall HookedPresent(IDirect3DDevice8* dev, const RECT* src, c
             for (int i = 0; i < 3; i++) { io.AddMouseButtonEvent(i, false); g_mouseBtn[i] = false; }
         }
 
+        UiBeforeNewFrame();
         ImGui_ImplDX8_NewFrame();
         ImGui::NewFrame();
         DrawTrainerMenu();
@@ -185,6 +318,8 @@ static HRESULT __stdcall HookedPresent(IDirect3DDevice8* dev, const RECT* src, c
             dev->EndScene();
         }
     }
+    LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+    FrameTiming(t1.QuadPart - t0.QuadPart);
     return g_origPresent(dev, src, dst, wnd, dirty);
 }
 
@@ -196,12 +331,19 @@ static void HookDevice(IDirect3DDevice8* dev) {
     g_origPresent = (Present_t)vtbl[kPresent];
     vtbl[kPresent] = (void*)&HookedPresent;
     VirtualProtect(&vtbl[kPresent], sizeof(void*), old, &old);
+    Log("Hook IDirect3DDevice8::Present (vtable slot 15): installed, device 0x%08X, previous Present 0x%08X",
+        (DWORD)dev, (DWORD)g_origPresent);
     InitImGui(dev);
 }
 
 // ----------------------------------------------------------------- game hooks
 static void __cdecl HookedUpdatePads() {
     g_nextUpdatePads();
+    // The aim locks' camera turns decided last tick go in now: CGame::Process
+    // has just started (this is its first call), so the game builds this
+    // tick's camera from them instead of showing them a tick late.
+    if (!game::ReplayPlaying()) ApplyPendingCameraTurns();
+    if (!game::ReplayPlaying()) DoorLockBeforeInput();   // locked car: let the player out
     if (!g_menuOpen) {
         // Fly mode uses WASD/Space/Ctrl/Shift itself: stop the game from also
         // walking, jumping or firing on them. Mouse look is left alone.
@@ -276,33 +418,10 @@ void ForceOffBike(void* bike, void* ped) {
 }
 
 static bool HookKnockOffRider() {
-    unsigned char* fn = (unsigned char*)KNOCK_OFF_RIDER;
-    // Another mod already put a jump here: chain to it instead of a trampoline.
-    if (fn[0] == 0xE9) {
-        g_origKnockOff = (KnockOff_t)((DWORD)fn + 5 + *(int*)(fn + 1));
-        WriteRel32(fn, 0xE9, (DWORD)&HookedKnockOffRider);
-        return true;
-    }
-    // expected prologue: 53 56 57 55 81 EC D0 00 00 00
-    const unsigned char expect[KNOCK_OFF_PROLOGUE] = { 0x53, 0x56, 0x57, 0x55, 0x81, 0xEC, 0xD0, 0x00, 0x00, 0x00 };
-    if (memcmp(fn, expect, KNOCK_OFF_PROLOGUE) != 0) return false;   // changed in an unknown way: skip
-
-    // trampoline = original prologue + jump back into the function
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(tramp, fn, KNOCK_OFF_PROLOGUE);
-    tramp[KNOCK_OFF_PROLOGUE] = 0xE9;
-    *(int*)(tramp + KNOCK_OFF_PROLOGUE + 1) = (int)((DWORD)fn + KNOCK_OFF_PROLOGUE - ((DWORD)tramp + KNOCK_OFF_PROLOGUE + 5));
-    g_origKnockOff = (KnockOff_t)tramp;
-
-    DWORD old;
-    VirtualProtect(fn, KNOCK_OFF_PROLOGUE, PAGE_EXECUTE_READWRITE, &old);
-    fn[0] = 0xE9;
-    *(int*)(fn + 1) = (int)((DWORD)&HookedKnockOffRider - ((DWORD)fn + 5));
-    memset(fn + 5, 0x90, KNOCK_OFF_PROLOGUE - 5);
-    VirtualProtect(fn, KNOCK_OFF_PROLOGUE, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), fn, KNOCK_OFF_PROLOGUE);
-    return true;
+    // expected prologue: 53 56 57 55 81 EC D0 00 00 00 (push ebx/esi/edi/ebp; sub esp, 0xD0)
+    static const unsigned char expect[KNOCK_OFF_PROLOGUE] = { 0x53, 0x56, 0x57, 0x55, 0x81, 0xEC, 0xD0, 0x00, 0x00, 0x00 };
+    return PrologueHook("CBike::KnockOffRider", "Never fall off bike", KNOCK_OFF_RIDER, expect, KNOCK_OFF_PROLOGUE,
+                        (void*)&HookedKnockOffRider, (void**)&g_origKnockOff);
 }
 
 // ---------------------------------------------------------------- wanted hook
@@ -322,7 +441,21 @@ static void __fastcall HookedUpdateWantedLevel(void* wanted, void*) {
         void* ped = FindPlayerPed();
         if (ped && at<void*>(ped, PED_WANTED) == wanted) { *(int*)wanted = 0; hold = true; }   // m_nChaos
     }
-    g_origUpdWanted(wanted);
+    // Stars picked above the story's limit: lift it for the player's update
+    // only, so the chaos isn't clamped back down (put back right after).
+    bool mine = false;
+    if (wanted && g_wantedAboveLimit) {
+        void* ped = FindPlayerPed();
+        mine = ped && at<void*>(ped, PED_WANTED) == wanted;
+    }
+    if (hold && mine) g_wantedAboveLimit = 0;
+    {
+        WantedLimitLift lift(mine && g_wantedAboveLimit != 0);
+        g_origUpdWanted(wanted);
+        // Back down to within the game's own limit (cleared, spray shop,
+        // busted, a script): the lift is no longer wanted.
+        if (lift.on && at<int>(wanted, WANTED_LEVEL) <= lift.savedLevel) g_wantedAboveLimit = 0;
+    }
     // Wanted level lock: the stars just worked out may not go past the
     // player's chosen maximum (SetWantedLevel also resets the chaos to match,
     // and its own call back in here then finds the level within the limit).
@@ -339,29 +472,10 @@ static void __fastcall HookedUpdateWantedLevel(void* wanted, void*) {
 }
 
 static bool HookUpdateWantedLevel() {
-    unsigned char* fn = (unsigned char*)0x4D2110;
-    if (fn[0] == 0xE9) {                     // another mod's jump: chain to it
-        g_origUpdWanted = (UpdWanted_t)((DWORD)fn + 5 + *(int*)(fn + 1));
-        WriteRel32(fn, 0xE9, (DWORD)&HookedUpdateWantedLevel);
-        return true;
-    }
     // expected: 8B 15 DC 10 69 00 (mov edx, [MaximumChaosLevel]) - position-independent
-    const unsigned char expect[6] = { 0x8B, 0x15, 0xDC, 0x10, 0x69, 0x00 };
-    if (memcmp(fn, expect, 6) != 0) return false;
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(tramp, fn, 6);
-    tramp[6] = 0xE9;
-    *(int*)(tramp + 7) = (int)((DWORD)fn + 6 - ((DWORD)tramp + 11));
-    g_origUpdWanted = (UpdWanted_t)tramp;
-    DWORD old;
-    VirtualProtect(fn, 6, PAGE_EXECUTE_READWRITE, &old);
-    fn[0] = 0xE9;
-    *(int*)(fn + 1) = (int)((DWORD)&HookedUpdateWantedLevel - ((DWORD)fn + 5));
-    fn[5] = 0x90;
-    VirtualProtect(fn, 6, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 6);
-    return true;
+    static const unsigned char expect[6] = { 0x8B, 0x15, 0xDC, 0x10, 0x69, 0x00 };
+    return PrologueHook("CWanted::UpdateWantedLevel", "Never wanted, wanted level lock", 0x4D2110, expect, 6,
+                        (void*)&HookedUpdateWantedLevel, (void**)&g_origUpdWanted);
 }
 
 // CPed::SetArrestPlayer (0x4EB5F0, cop = this, the suspect as argument): every
@@ -377,29 +491,10 @@ static void __fastcall HookedSetArrestPlayer(void* cop, void*, void* suspect) {
 }
 
 static bool HookSetArrestPlayer() {
-    unsigned char* fn = (unsigned char*)0x4EB5F0;
-    if (fn[0] == 0xE9) {
-        g_origArrest = (Arrest_t)((DWORD)fn + 5 + *(int*)(fn + 1));
-        WriteRel32(fn, 0xE9, (DWORD)&HookedSetArrestPlayer);
-        return true;
-    }
     // expected: 53 55 89 CD 8B 5C 24 0C (push ebx; push ebp; mov ebp,ecx; mov ebx,[esp+0C])
-    const unsigned char expect[8] = { 0x53, 0x55, 0x89, 0xCD, 0x8B, 0x5C, 0x24, 0x0C };
-    if (memcmp(fn, expect, 8) != 0) return false;
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(tramp, fn, 8);
-    tramp[8] = 0xE9;
-    *(int*)(tramp + 9) = (int)((DWORD)fn + 8 - ((DWORD)tramp + 13));
-    g_origArrest = (Arrest_t)tramp;
-    DWORD old;
-    VirtualProtect(fn, 8, PAGE_EXECUTE_READWRITE, &old);
-    fn[0] = 0xE9;
-    *(int*)(fn + 1) = (int)((DWORD)&HookedSetArrestPlayer - ((DWORD)fn + 5));
-    memset(fn + 5, 0x90, 3);
-    VirtualProtect(fn, 8, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 8);
-    return true;
+    static const unsigned char expect[8] = { 0x53, 0x55, 0x89, 0xCD, 0x8B, 0x5C, 0x24, 0x0C };
+    return PrologueHook("CPed::SetArrestPlayer", "No busts while never wanted", 0x4EB5F0, expect, 8,
+                        (void*)&HookedSetArrestPlayer, (void**)&g_origArrest);
 }
 
 // CVehicle::KillPedsInVehicle (0x5B8560): run by every vehicle type's
@@ -425,29 +520,10 @@ static void __fastcall HookedKillPedsInVehicle(void* veh, void*) {
 }
 
 static bool HookKillPedsInVehicle() {
-    unsigned char* fn = (unsigned char*)0x5B8560;
-    if (fn[0] == 0xE9) {
-        g_origKillPeds = (KillPeds_t)((DWORD)fn + 5 + *(int*)(fn + 1));
-        WriteRel32(fn, 0xE9, (DWORD)&HookedKillPedsInVehicle);
-        return true;
-    }
     // expected: 53 89 CB 8B 83 A8 01 00 00 (push ebx; mov ebx,ecx; mov eax,[ebx+1A8])
-    const unsigned char expect[9] = { 0x53, 0x89, 0xCB, 0x8B, 0x83, 0xA8, 0x01, 0x00, 0x00 };
-    if (memcmp(fn, expect, 9) != 0) return false;
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(tramp, fn, 9);
-    tramp[9] = 0xE9;
-    *(int*)(tramp + 10) = (int)((DWORD)fn + 9 - ((DWORD)tramp + 14));
-    g_origKillPeds = (KillPeds_t)tramp;
-    DWORD old;
-    VirtualProtect(fn, 9, PAGE_EXECUTE_READWRITE, &old);
-    fn[0] = 0xE9;
-    *(int*)(fn + 1) = (int)((DWORD)&HookedKillPedsInVehicle - ((DWORD)fn + 5));
-    memset(fn + 5, 0x90, 4);
-    VirtualProtect(fn, 9, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 9);
-    return true;
+    static const unsigned char expect[9] = { 0x53, 0x89, 0xCB, 0x8B, 0x83, 0xA8, 0x01, 0x00, 0x00 };
+    return PrologueHook("CVehicle::KillPedsInVehicle", "Survive vehicle explosions", 0x5B8560, expect, 9,
+                        (void*)&HookedKillPedsInVehicle, (void**)&g_origKillPeds);
 }
 
 // CPed::SetFall (0x4FD9F0, thiscall(extraTime, animId, evenIfNotInControl)):
@@ -456,45 +532,50 @@ static bool HookKillPedsInVehicle() {
 typedef void (__thiscall* SetFall_t)(void* ped, int extraTime, int animId, bool evenIfNotInControl);
 static SetFall_t g_origSetFall = nullptr;
 
+// The game's own get-in / get-out of car code (0x516000-0x51C000, and the
+// jump-out at 0x5860CE: rolling out of a moving car, being pulled out) ends its animation with SetFall and
+// gets the ped up from it. Blocked, the player was left lying flat for good
+// after a roll-out - so those falls always go through.
 static void __fastcall HookedSetFall(void* ped, void*, int extraTime, int animId, bool evenIfNotInControl) {
-    if (ped && ped == FindPlayerPed() && NoRagdollOn()) return;
+    DWORD from = (DWORD)__builtin_return_address(0);
+    bool carExit = (from >= 0x516000 && from < 0x51C000) ||
+                   from == 0x5860D3;   // the vehicle's jump-out: car speed given to the ped, then knocked down (anim 0xAD)
+    if (ped && ped == FindPlayerPed() && carExit) NoteCarExitFall();
+    if (ped && ped == FindPlayerPed() && NoRagdollOn() && !carExit) return;
     g_origSetFall(ped, extraTime, animId, evenIfNotInControl);
 }
 
 static bool HookSetFall() {
-    unsigned char* fn = (unsigned char*)0x4FD9F0;
-    if (fn[0] == 0xE9) {
-        g_origSetFall = (SetFall_t)((DWORD)fn + 5 + *(int*)(fn + 1));
-        WriteRel32(fn, 0xE9, (DWORD)&HookedSetFall);
-        return true;
-    }
     // expected: 53 56 57 55 89 CD (push ebx; push esi; push edi; push ebp; mov ebp,ecx)
-    const unsigned char expect[6] = { 0x53, 0x56, 0x57, 0x55, 0x89, 0xCD };
-    if (memcmp(fn, expect, 6) != 0) return false;
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(tramp, fn, 6);
-    tramp[6] = 0xE9;
-    *(int*)(tramp + 7) = (int)((DWORD)fn + 6 - ((DWORD)tramp + 11));
-    g_origSetFall = (SetFall_t)tramp;
-    DWORD old;
-    VirtualProtect(fn, 6, PAGE_EXECUTE_READWRITE, &old);
-    fn[0] = 0xE9;
-    *(int*)(fn + 1) = (int)((DWORD)&HookedSetFall - ((DWORD)fn + 5));
-    fn[5] = 0x90;
-    VirtualProtect(fn, 6, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 6);
-    return true;
+    static const unsigned char expect[6] = { 0x53, 0x56, 0x57, 0x55, 0x89, 0xCD };
+    return PrologueHook("CPed::SetFall", "No ragdoll, walk on water landings", 0x4FD9F0, expect, 6,
+                        (void*)&HookedSetFall, (void**)&g_origSetFall);
 }
 
+// CWeapon::Fire (0x5D45E0, thiscall(shooter, source), ret 8): every shot by
+// every gun. The trainer counts the player's shots here (one-shot vehicles,
+// wall bang, bullet penetration) and stretches the range for penetration.
+typedef bool (__thiscall* WeaponFire_t)(void* weapon, void* shooter, float* source);
+static WeaponFire_t g_origWeaponFire = nullptr;
+
+static bool __fastcall HookedWeaponFire(void* weapon, void*, void* shooter, float* source) {
+    return TrainerWeaponFire(weapon, shooter, source, g_origWeaponFire);
+}
+
+static bool HookWeaponFire() {
+    // expected: 53 56 57 55 83 EC 28 (push ebx; push esi; push edi; push ebp; sub esp, 0x28)
+    static const unsigned char expect[7] = { 0x53, 0x56, 0x57, 0x55, 0x83, 0xEC, 0x28 };
+    return PrologueHook("CWeapon::Fire", "Wall bang, one-shot vehicles, bullet penetration, damage multiplier, "
+                        "explosive / fire bullets, teleport / delete / vehicle guns, Hunter aimbot's shot count",
+                        0x5D45E0, expect, 7, (void*)&HookedWeaponFire, (void**)&g_origWeaponFire);
+}
+
+static void ShowStartupMessage();
 static void __cdecl HookedGameProcess() {
     g_nextGameProcess();
 
-    // Menu just opened: swing the camera straight behind the player. The mouse
-    // is blanked while the menu is open, so it then stays put.
-    static bool wasOpen = false;
-    if (g_menuOpen && !wasOpen && FindPlayerPed()) CameraBehindPlayer(TheCamera);
-    wasOpen = g_menuOpen;
+    // Opening the menu leaves the camera wherever it looks: the mouse is
+    // blanked while the menu is open, so the view simply holds still.
 
     if (!g_device && *D3DDevice) {
         g_device = (IDirect3DDevice8*)*D3DDevice;
@@ -502,26 +583,169 @@ static void __cdecl HookedGameProcess() {
     }
     if (!g_origWndProc && *GameWindow) {
         g_origWndProc = (WNDPROC)SetWindowLongA(*GameWindow, GWL_WNDPROC, (LONG)&HookedWndProc);
-        ShowNative("Modern VC Trainer loaded. Press INSERT or F7 to open the menu.");
+        if (g_origWndProc) Log("Hook window procedure: installed (previous 0x%08X)", (DWORD)g_origWndProc);
+        else Log("Hook window procedure: NOT installed (SetWindowLong error %lu). Not working: menu key, hotkeys", GetLastError());
+        ShowStartupMessage();
     }
     TrainerTick();
 }
 
+// A redirected call site, recorded like the prologue hooks.
+static DWORD ChainCallLogged(const char* name, const char* feature, DWORD site, void* hook) {
+    HookRecord& r = NewRecord(name, feature, site, 5);
+    r.next = ChainCall(site, hook);
+    r.state = r.next ? HOOK_INSTALLED : HOOK_NOT_A_CALL;
+    LogHook(r, nullptr);
+    return r.next;
+}
+
+// A call site whose v1.0 target is known (logged as the game's own or another mod's).
+static DWORD ChainCallOwn(const char* name, const char* feature, DWORD site, DWORD own, void* hook) {
+    HookRecord& r = NewRecord(name, feature, site, 5);
+    r.own = own;
+    r.next = ChainCall(site, hook);
+    r.state = r.next ? HOOK_INSTALLED : HOOK_NOT_A_CALL;
+    LogHook(r, nullptr);
+    return r.next;
+}
+
+// ---------------------------------------------------------------- drive-by shots
+// DoDriveByShootings (bike 0x5C91E0, boat 0x5C9540, car 0x5C97B0) fires with
+// CWeapon::FireFromCar (0x5D44E0, thiscall(vehicle, left, right), ret 0Ch) right
+// before each "timer = now + 70 ms":
+//   0x5C949C  E8 3F B0 00 00, after FF 34 24 FF 74 24 08 55     bike: push right; push left; push ebp
+//   0x5C9732  E8 A9 AD 00 00, after 6A 01 FF 74 24 0C 57        boat: push 1; push left; push edi
+//   0x5C99DE  E8 FD AA 00 00, after 8A 44 24 08 89 D9 6A 01 50 56  car: push 1; push al (left); push esi
+// The hook records the gun, vehicle and side the game chose this tick, so rapid
+// fire adds its extra shots the same way (combat.cpp).
+static const DWORD FIRE_FROM_CAR = 0x5D44E0;
+static DWORD g_fromCarNext[3] = { FIRE_FROM_CAR, FIRE_FROM_CAR, FIRE_FROM_CAR };
+typedef bool (__thiscall* FromCar_t)(void* weapon, void* veh, int left, int right);
+template<int N> static bool __fastcall HookedFireFromCar(void* weapon, void*, void* veh, int left, int right) {
+    bool ok = ((FromCar_t)g_fromCarNext[N])(weapon, veh, left, right);
+    if (ok) TrainerDriveByShot(weapon, veh, left & 0xFF, right & 0xFF);
+    return ok;
+}
+
+// ---------------------------------------------------------------- Hunter shots
+// CAutomobile::ProcessControl fires the Hunter's weapons with a temporary CWeapon
+// on the stack, straight into the shot functions (never CWeapon::Fire):
+//   0x5980B0, 0x5981D0  FireProjectile (0x5CCF90, thiscall(shooter, source, power)):
+//                       push [69A5E4]; push eax; push ebp; call - left / right rocket pod
+//   0x5982B6, 0x5983F3  FireInstantHit (0x5D1140, thiscall(shooter, source)):
+//                       push eax; push ebp; call - the cannon
+// Each is called through, then counted (combat.cpp: wall bang, one-shot vehicles,
+// penetration and the heli aimbot see the Hunter's shots).
+static const DWORD FIRE_PROJECTILE = 0x5CCF90, FIRE_INSTANT_HIT = 0x5D1140;
+static DWORD g_heliNext[4] = { FIRE_PROJECTILE, FIRE_PROJECTILE, FIRE_INSTANT_HIT, FIRE_INSTANT_HIT };
+typedef bool (__thiscall* Projectile_t)(void* weapon, void* shooter, float* source, float power);
+typedef bool (__thiscall* InstantHit_t)(void* weapon, void* shooter, float* source);
+template<int N> static bool __fastcall HookedHeliRocket(void* weapon, void*, void* shooter, float* source, float power) {
+    bool ok = ((Projectile_t)g_heliNext[N])(weapon, shooter, source, power);
+    TrainerHeliShot(weapon, shooter, source, ok);
+    return ok;
+}
+template<int N> static bool __fastcall HookedHeliCannon(void* weapon, void*, void* shooter, float* source) {
+    bool ok = ((InstantHit_t)g_heliNext[N])(weapon, shooter, source);
+    TrainerHeliShot(weapon, shooter, source, ok);
+    return ok;
+}
+
+static void HookVehicleShots() {
+    static const char* kDriveBy = "Rapid fire in drive-bys";
+    static const DWORD kFromCar[3] = { 0x5C949C, 0x5C9732, 0x5C99DE };
+    void* const fromCar[3] = { (void*)&HookedFireFromCar<0>, (void*)&HookedFireFromCar<1>, (void*)&HookedFireFromCar<2> };
+    static const char* const kFromCarName[3] = { "bike drive-by -> CWeapon::FireFromCar", "boat drive-by -> CWeapon::FireFromCar",
+                                                 "car drive-by -> CWeapon::FireFromCar" };
+    for (int i = 0; i < 3; i++)
+        if (DWORD p = ChainCallOwn(kFromCarName[i], kDriveBy, kFromCar[i], FIRE_FROM_CAR, fromCar[i])) g_fromCarNext[i] = p;
+
+    static const char* kHeli = "Hunter shot count (wall bang, one-shot vehicles, penetration, heli aimbot)";
+    static const DWORD kHeliSites[4] = { 0x5980B0, 0x5981D0, 0x5982B6, 0x5983F3 };
+    static const DWORD kHeliOwn[4] = { FIRE_PROJECTILE, FIRE_PROJECTILE, FIRE_INSTANT_HIT, FIRE_INSTANT_HIT };
+    void* const heli[4] = { (void*)&HookedHeliRocket<0>, (void*)&HookedHeliRocket<1>,
+                            (void*)&HookedHeliCannon<2>, (void*)&HookedHeliCannon<3> };
+    static const char* const kHeliName[4] = { "Hunter left rocket -> FireProjectile", "Hunter right rocket -> FireProjectile",
+                                              "Hunter cannon -> FireInstantHit", "Hunter cannon (2) -> FireInstantHit" };
+    for (int i = 0; i < 4; i++)
+        if (DWORD p = ChainCallOwn(kHeliName[i], kHeli, kHeliSites[i], kHeliOwn[i], heli[i])) g_heliNext[i] = p;
+}
+
+// ---------------------------------------------------------------- wide-FOV crosshair
+// CCamera::Find3rdPersonCamTargetVector (0x46F890; called only by the weapon
+// fire code) places the shot's ray with the CCam FOV, while the frame is drawn
+// with the widened CDraw FOV, so at a wide FOV slider the bullet leaves the
+// crosshair. The hook builds the ray with the drawn FOV (combat.cpp
+// WideCrosshairTarget) and otherwise calls the game's own. Only on the v1.0
+// bytes: a jump from another mod there is not chained, the aiming FOV is then
+// just left at the game's.
+bool g_wideCrosshairHook = false;
+typedef void (__thiscall* Find3rd_t)(void* camera, float dist, float px, float py, float pz, float* source, float* target);
+static Find3rd_t g_origFind3rd = nullptr;
+static void __fastcall HookedFind3rdPersonCamTargetVector(void* camera, void*, float dist, float px, float py, float pz,
+                                                          float* source, float* target) {
+    float pos[3] = { px, py, pz };
+    if (!WideCrosshairTarget(dist, pos, source, target)) g_origFind3rd(camera, dist, px, py, pz, source, target);
+}
+
+static void HookFind3rdPersonCamTargetVector() {
+    static const unsigned char expect[8] = { 0x53, 0x56, 0x55, 0x89, 0xCD, 0x83, 0xEC, 0x28 };
+    if (memcmp((const void*)FIND_3RD_PERSON_TARGET, expect, sizeof expect) != 0) {
+        Log("Hook CCamera::Find3rdPersonCamTargetVector (0x46F890): not v1.0 or hooked by another mod; aiming keeps the game's FOV");
+        return;
+    }
+    if (PrologueHook("CCamera::Find3rdPersonCamTargetVector", "FOV slider while aiming", FIND_3RD_PERSON_TARGET, expect,
+                     sizeof expect, (void*)&HookedFind3rdPersonCamTargetVector, (void**)&g_origFind3rd)) {
+        g_wideCrosshairHook = true;
+        Log("Hook CCamera::Find3rdPersonCamTargetVector (0x46F890): installed, shots follow the drawn crosshair at any FOV");
+    }
+}
+
 bool InstallHooks() {
-    if (!IsVC10()) return false;
+    if (!IsVC10()) {
+        Log("Modern VC Trainer v%s: this gta-vc.exe is not v1.0 (build stamp / base differ) - nothing hooked", VCTRAINER_VERSION);
+        return false;
+    }
+    Log("---- Modern VC Trainer v%s starting (gta-vc.exe v1.0, build stamp 504D6947)", VCTRAINER_VERSION);
     LoadSettings();
-    DWORD prev = ChainCall(HOOK_PROCESS_SITE, (void*)&HookedGameProcess);
+    DWORD prev = ChainCallLogged("main loop -> CGame::Process", "the whole trainer", HOOK_PROCESS_SITE, (void*)&HookedGameProcess);
     if (!prev) {
         MessageBoxA(nullptr, "Modern VC Trainer: another mod has replaced the game's main-loop call, "
                     "so the trainer can't start.", "Modern VC Trainer", MB_ICONWARNING);
         return true;   // the version is fine; don't also show the version warning
     }
     g_nextGameProcess = (VoidFn)prev;
-    if (DWORD p = ChainCall(HOOK_PADS_SITE, (void*)&HookedUpdatePads)) g_nextUpdatePads = (VoidFn)p;
+    if (DWORD p = ChainCallLogged("CGame::Process -> CPad::UpdatePads", "Menu mouse cursor, game input blocked while the menu "
+                                  "is open, fly mode's key blanking", HOOK_PADS_SITE, (void*)&HookedUpdatePads))
+        g_nextUpdatePads = (VoidFn)p;
     HookKnockOffRider();
     HookUpdateWantedLevel();
     HookSetArrestPlayer();
     HookKillPedsInVehicle();
     HookSetFall();
+    HookWeaponFire();
+    HookVehicleShots();
+    HookFind3rdPersonCamTargetVector();
+    int ok = 0;
+    for (int i = 0; i < g_hookCount; i++) ok += g_hookLog[i].state == HOOK_INSTALLED || g_hookLog[i].state == HOOK_CHAINED;
+    Log("Hooks: %d of %d game hooks installed", ok, g_hookCount);
     return true;
+}
+
+// The start-up help-box line: loaded, and which features a failed hook switched off.
+static void ShowStartupMessage() {
+    char off[200] = "";
+    int n = 0;
+    for (int i = 0; i < g_hookCount; i++) {
+        const HookRecord& r = g_hookLog[i];
+        if (r.state == HOOK_INSTALLED || r.state == HOOK_CHAINED) continue;
+        // the short name: up to the first comma of the feature list
+        char f[48]; lstrcpynA(f, r.feature, sizeof f);
+        if (char* c = strchr(f, ',')) *c = 0;
+        n += _snprintf(off + n, sizeof off - n - 1, "%s%s", n ? ", " : "", f);
+        if (n < 0 || n >= (int)sizeof off - 2) { n = (int)strlen(off); break; }
+    }
+    if (n) ShowNative("Modern VC Trainer v%s loaded (INSERT/F7). Not working - another mod changed the game there: %s. See VCTrainer.log",
+                      VCTRAINER_VERSION, off);
+    else   ShowNative("Modern VC Trainer v%s loaded. Press INSERT or F7 to open the menu.", VCTRAINER_VERSION);
 }

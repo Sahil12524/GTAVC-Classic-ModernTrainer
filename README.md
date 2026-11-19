@@ -6,6 +6,8 @@ No separate program to run: it's an `.asi` plugin for Ultimate ASI Loader - drop
 `VCTrainer.asi` in the game folder, start the game, press **INSERT** (or **F7**).
 Works side by side with CLEO and other mods.
 
+**Version 1.3.0** - see [What's new](#whats-new-in-130).
+
 > Fan-made and unofficial. Not affiliated with or endorsed by Rockstar Games or
 > Take-Two Interactive. This repository contains no game files. Single-player only.
 
@@ -13,11 +15,13 @@ Works side by side with CLEO and other mods.
 
 ## Contents
 
+- [What's new in 1.3.0](#whats-new-in-130)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installing](#installing)
 - [Using the trainer](#using-the-trainer)
   - [Menu controls](#menu-controls)
+  - [Two menu layouts](#two-menu-layouts)
   - [Tabs](#tabs)
   - [Hotkeys](#hotkeys)
   - [Fly mode](#fly-mode)
@@ -34,6 +38,31 @@ Works side by side with CLEO and other mods.
 
 ---
 
+## What's new in 1.3.0
+
+- **`VCTrainer.log`** next to `gta-vc.exe`: the version, every hook and whether it went in (with
+  the bytes it found when it didn't), the settings loaded, every spawn the game refused, every
+  model that didn't load, files that couldn't be read or written, and once a minute while
+  *Show enemies through walls* is on, what the trainer costs per drawn frame.
+- **No silent failures:** if another mod changed one of the game functions the trainer hooks,
+  the start-up help box names the features that won't work.
+- **Full pools are reported:** spawning bodyguards, peds or vehicles into a full pool says how
+  many were made and how full the pool is (*"5 of 8 bodyguards made - ped pool full (202 of 210
+  used)"*), and keeps trying the rest instead of stopping at the first refusal. The old limit of
+  16 bodyguards at once is gone.
+- **Dead spawned peds are handed back to the game**, so their bodies are cleared like any other.
+- **Hotkeys never miss a tap:** presses are recorded the moment they happen (keyboard and mouse
+  buttons) and run on the next game update, however short the tap.
+- **Enemy markers and the Active list cost less:** who is an enemy and who is in sight is worked
+  out 30 times a second instead of every drawn frame; only the on-screen position is per frame.
+  *Show enemies through walls* now also draws with no overlay row ticked.
+- **Settings are saved only when something changed**, through a temporary file, so a crash while
+  saving can't empty `VCTrainer.ini`.
+- **Spawner pictures survive alt-tab:** a picture that couldn't be made during a device reset is
+  made again later instead of being marked as missing.
+- Game data files (`data\carcols.dat`, `default.ide`, ...) and the trainer's own files are found
+  in the game folder whatever the working directory.
+
 ## Features
 
 **Player**
@@ -45,11 +74,17 @@ Works side by side with CLEO and other mods.
 - **Never wanted** also stops busts: cops can't arrest you or pull you out of a car for it
 - **No ragdoll:** cars, explosions, punches and falls never knock you down
 - **Fly mode / no clip:** fly anywhere through walls and into the sky, on foot or in a vehicle; shoot, throw and switch weapons while flying
-- **Movement:** super jump, super run, CS:GO-style **auto bunny hop** (AFH / ABH, air strafing) and **ramp surfing**, no landing roll
+- **Movement:** super jump, super run, CS:GO-style **auto bunny hop** (AFH / ABH, air strafing, instant full speed, keep speed on walls) and **ramp surfing**, no landing roll
+- **Walk on water:** on foot the sea, rivers and pools are solid ground
+- **Invisible**, **freeze position** (you, or the vehicle you're in, even in mid-air) and a **forcefield** that pushes everything away (10 m) or destroys it (5 m)
+- **Skins:** wear any of Tommy's outfits or any ped model; try one on by selecting it, keep it with a double-click / Enter
+- Field of view slider and a CS:GO-style **speed meter** (`vel` in u/s, km/h or m/s)
 
 **Combat**
-- **Aim lock-on:** while aiming, the crosshair snaps onto the nearest enemy anywhere around you (gang members, police, criminals, anyone attacking you, police helicopters), leads moving targets, follows knocked-down enemies; silent aim while bunny hopping
+- **Aim lock-on:** while aiming, the crosshair snaps onto the nearest enemy anywhere around you (gang members, police, criminals, anyone attacking you, police helicopters), leads moving targets, follows knocked-down enemies; **silent aim** (always, or only while bunny hopping) and **snap camera back**
+- **Drive-by aimbot:** hold right mouse on a drive-by and every bullet lands on the nearest enemy
 - **Show enemies through walls:** boxes round every enemy (solid when visible, dashed behind walls), distance, and edge arrows for ones off screen
+- **Hunter aimbot:** in a Hunter or Sea Sparrow, firing takes out the vigilante mission's marked targets one by one
 - Riot and "peds attack you" game cheats make every ped a target
 
 **Weapons**
@@ -59,10 +94,20 @@ Works side by side with CLEO and other mods.
 - **One-shot vehicles:** any vehicle you shoot blows up, tanks and police helicopters included
 - **No-scope sniper / rocket launcher:** fire from the hip with one click, along the crosshair or at the locked enemy
 - **Sniper full auto:** hold the button to keep firing, in the scope or from the hip
+- **Bullet penetration:** bullets fly 500 m and pass through everything on the line
+- **Explosive bullets**, **fire bullets**, **teleport gun**, **delete gun**, **vehicle gun** (every shot fires a random car), **super punch**, and a **damage multiplier** for your own guns
 - Infinite ammo leaves the remote grenade detonator alone, so the detonator never gets stuck in your hand
 
+**Peds**
+- **Bodyguards** of any type with any weapon: they follow you, ride with you and go for anyone attacking you
+- Spawn any ped model, armed, friendly or hostile; remove the ones you spawned
+- Everyone within 40 m: set on fire, freeze / unfreeze, make them fight each other, make them follow you, delete them (mission people are left alone)
+
 **Vehicles**
-- Spawn any car, bike, boat, helicopter or RC vehicle (searchable list with in-game names), optionally seated in it
+- Spawn any car, bike, boat, helicopter or RC vehicle (searchable list with in-game names), optionally seated in it; the spawner shows a **picture of every vehicle**, drawn from the game's own model, and in the list layout an **info panel** with its speed, acceleration, braking and traction (from `handling.cfg`)
+- **Garage:** save the vehicle you're in (model and colours) and spawn it again later
+- **Rainbow paint**, **bulletproof tyres**, **invisible vehicle**, **delete vehicle** (yours or the nearest), extra **acceleration / grip / brakes**
+- Get out of a moving car at any speed with the game's own roll-out, and take a manned police car while never wanted
 - Repair, flip upright, lock/unlock doors, boost, jump, stop, repaint from the game's 95-colour palette, get into the nearest vehicle
 - **Auto lock doors** when you get in (cars with doors), unlocked again when you get out
 - **Flip upright keeps your speed**; **Auto flip** (cars only) turns your car back over the moment it lands on its roof
@@ -77,6 +122,7 @@ Works side by side with CLEO and other mods.
 - Pedestrian and traffic density
 - Disable mission countdown timers, including rampage timers
 - **Genocide mode:** every ped dies and every vehicle around you blows up, new ones too (you, your vehicle and passengers are spared)
+- Gravity, clock speed, **bullet time** (slow motion while you aim), hide the radar
 
 **Teleport**
 - Categorised place list, each nearest first with district and distance: current mission (people, vehicles, objects, destinations), races and events, mission contacts, safehouses, businesses, shops, hidden packages, rampages, money, bribes, health and armour, weapons, other pickups, landmarks, saved locations
@@ -92,8 +138,9 @@ Works side by side with CLEO and other mods.
 **Quality of life**
 - Every feature can be put on a hotkey, including key combinations like `Ctrl + G`, `Shift + F`, `Alt + 1` and mouse buttons
 - Master ON/OFF switch that pauses every cheat at once
-- Optional on-screen overlay: coordinates, vehicle speed, FPS
-- Settings and hotkeys are remembered between sessions
+- Optional on-screen overlay: coordinates, vehicle speed, FPS, speed meter, active cheats
+- Two menu layouts: a Menyoo-style list (fully customisable look) or the classic window
+- Settings and hotkeys are remembered between sessions; what happened at start-up is in `VCTrainer.log`
 
 ---
 
@@ -122,7 +169,9 @@ mods to Vice City, so it works alongside CLEO, SilentPatch, widescreen fixes and
 2. Download `VCTrainer.asi` from the [latest release](../../releases/latest) and put it next to
    `gta-vc.exe` (or in a `scripts` folder inside the game folder: the loader looks in both).
 3. Start the game normally and load a save (or start a new game).
-4. A message appears in the top-left help box: *"Modern VC Trainer loaded. Press INSERT or F7 to open the menu."*
+4. A message appears in the top-left help box: *"Modern VC Trainer v1.3.0 loaded. Press INSERT or F7 to open the menu."*
+   (If another mod has changed a game function the trainer needs, the message says which
+   features won't work; `VCTrainer.log` has the details.)
 5. Press **INSERT** or **F7**.
 
 Any other mods are installed the usual way, for example CLEO's files or more `.asi` files in the
@@ -160,19 +209,35 @@ the camera. Close the menu to play again.
 The menu only appears **during gameplay**: it is not available on the game's main menu
 or pause screen.
 
+### Two menu layouts
+
+- **List (Menyoo style)** - the default: a list of pages you go through with the arrow keys or
+  the mouse, with an **info panel** beside it for vehicles and skins (picture, speed /
+  acceleration / braking / traction bars from `handling.cfg`, ped type and stats from
+  `pedstats.dat`). Its whole look - colours, presets, size, fonts, effects - is under
+  **Settings → Interface**.
+- **Classic window** - a window with a sidebar of pages (the tabs below).
+
+Switch between them under **Settings → Menu layout** (either layout).
+
 ### Tabs
+
+The same features in both layouts; the classic window's pages:
 
 | Tab | What's in it |
 |---|---|
-| **Player** | Health/armour cheats, never wanted, sprint, reload, aim lock-on, no ragdoll, show enemies through walls, proofs, movement (super jump, super run, bunny hop, surf, no landing roll), fly mode, health & armour sliders, max health/armour, wanted stars and wanted lock, money |
-| **Weapons** | Infinite ammo / no reload, wall bang, one-shot vehicles, rapid fire, no-scope sniper, sniper full auto, the three weapon sets, a button for every weapon, custom ammo amount |
-| **Vehicle** | Current-vehicle tools (repair, flip, doors, auto lock, boost, jump, stop), car god mode and protection, survive explosions, never fall off bike, heavy car (just heavy / push / blow up), kill peds on one touch, auto flip, paint, and the vehicle spawner |
-| **World** | Time, freeze time, weather, game speed, pedestrian and traffic density, genocide mode, mission and rampage timers |
-| **Teleport** | Your coordinates and district, teleport to coordinates, mission marker, and the categorised place list (see Features), plus saved locations |
 | **Active (N)** | Everything switched on right now, from the trainer and from game cheats, with a **Turn off** button on each and **Turn everything off** |
+| **Player** | Health/armour cheats, never wanted, sprint, reload, aim lock-on, no ragdoll, walk on water, show enemies through walls, proofs, movement (super jump, super run, bunny hop, surf, no landing roll), fly mode, invisible, freeze position, forcefield, health & armour sliders, max health/armour, wanted stars and wanted lock, money |
+| **Weapons** | Infinite ammo / no reload, wall bang, bullet penetration, one-shot vehicles, rapid fire, no-scope sniper, sniper full auto, aim lock / silent aim / drive-by aimbot, explosive and fire bullets, teleport / delete / vehicle guns, super punch, damage multiplier, the three weapon sets, a button for every weapon, custom ammo amount, remove all weapons |
+| **Vehicle** | Current-vehicle tools (repair, flip, doors, auto lock, boost, jump, stop, delete), car god mode and protection, survive explosions, never fall off bike, heavy car (just heavy / push / blow up), kill peds on one touch, auto flip, Hunter aimbot, rainbow paint, bulletproof tyres, invisible vehicle, performance (acceleration / grip / brakes), paint, and the **Garage** |
+| **Spawner** | Every vehicle by category as a **picture** made from the game's own model (wheels included, helicopters without), with a search box; click to pick, double-click or **Spawn** to spawn |
+| **Skins** | Tommy's outfits and every ped model; selecting one tries it on, double-click or Enter keeps it, leaving the page without keeping puts your old look back |
+| **World** | Time, freeze time, weather, game speed, pedestrian and traffic density, gravity, clock speed, bullet time, hide radar, genocide mode, mission and rampage timers |
+| **Peds** | Bodyguards (type, weapon, how many), spawn a ped, and actions on everyone within 40 m |
+| **Teleport** | Your coordinates and district, teleport to coordinates, mission marker, and the categorised place list (see Features), plus saved locations |
 | **Cheats** | All 58 built-in game cheats, grouped (player, weapons, weather, vehicle spawns, vehicles, pedestrians, skins). Cheats that stay on are **checkboxes**: tick to turn on, untick to turn off. One-off cheats are buttons. Hover anything to see the original code |
 | **Hotkeys** | Bind any feature to a key (see below) |
-| **Settings** | Mouse speed for the menu cursor, on-screen overlay, save settings |
+| **Settings** | Menu layout, mouse speed for the menu cursor, on-screen overlay (coordinates, vehicle speed, FPS, active cheats, speed meter and its units), save settings |
 
 Tips:
 - **Turning game cheats off:** in the original game, typing a cheat again sometimes switches it off, but it always says "Cheat activated", and some cheats (green lights, aggressive/pink/black traffic, women follow you, media meter, fat/skinny) can never be switched off at all. The trainer reads each cheat's real switch inside the game, so the checkboxes always show the true state and unticking really turns it off. The only exceptions are *Peds riot* and *Peds attack you*: they overwrite the game's pedestrian tables, so undoing them needs a save reload.
@@ -204,6 +269,8 @@ Game cheats).
 - Use the **search box** or **Only bound** to find things quickly. **Clear all** removes every binding.
 - Hotkeys work in game while the menu is **closed**. Plain INSERT and F7 are reserved for the menu
   (`Ctrl + Insert` and similar are fine).
+- Every press counts, however short: a tap is recorded the moment it happens and runs on the
+  next game update.
 - When a toggle is switched by hotkey, the game's help box says so (e.g. *Fly mode: ON*).
 
 ### Fly mode
@@ -256,9 +323,12 @@ All in the game folder:
 
 | File | Contents |
 |---|---|
-| `VCTrainer.ini` | Your toggles, hotkeys, sliders (fly, jump, run, hop), max health/armour. Saved when you close the menu |
-| `VCTrainer_layout.ini` | Menu window size and position |
+| `VCTrainer.ini` | Your toggles, hotkeys, sliders (fly, jump, run, hop), max health/armour. Saved when you close the menu, and only if something changed |
+| `VCTrainer_layout.ini` | Classic window size and position |
+| `VCTrainer_ui.ini` | The list layout's look (colours, size, fonts, effects) |
 | `VCTrainer_positions.txt` | Saved teleport locations |
+| `VCTrainer_garage.txt` | Garage: saved vehicles (`model colour1 colour2 name`) |
+| `VCTrainer.log` | What the trainer did: start-up (version, hooks, settings), refused spawns, models that didn't load, files it couldn't read or write, timing. Moved to `VCTrainer.previous.log` past 1 MB |
 
 Delete them to reset the trainer to defaults.
 
@@ -268,7 +338,7 @@ Delete them to reset the trainer to defaults.
 
 ## Uninstalling
 
-Delete `VCTrainer.asi` from the game folder (or `scripts`), and the three files above if you
+Delete `VCTrainer.asi` from the game folder (or `scripts`), and the files above if you
 want. Leave the ASI loader's `dinput8.dll` in place if other mods use it.
 The trainer never modifies `gta-vc.exe` or any game file on disk; all changes happen in
 memory while the game runs.
@@ -287,6 +357,8 @@ memory while the game runs.
 | Another mod stopped working, or the ASI loader got replaced | Only one file can be called `dinput8.dll` - it must be the ASI loader's. If an old trainer `dinput8.dll` is there, replace it with the loader's and use `VCTrainer.asi`. |
 | *"another mod has replaced the game's main-loop call"* | A mod changed that spot in a way the trainer can't chain through. Remove mods one at a time to find which one, and please open an issue. |
 | Spawned boat is on land | Boats spawn in front of you; stand at the water's edge. |
+| A feature does nothing, or the start-up message says *"Not working - another mod changed the game there"* | Open `VCTrainer.log`: each `Hook ...` line says whether it went in, and for one that didn't, the bytes another mod left there. |
+| *"... made - ped pool full (N of 210 used)"* | The game has no room for more people right now (VCModernFix keeps the last 8 slots for the game). Wait for bodies to clear, or delete people nearby. |
 
 ---
 
@@ -324,6 +396,12 @@ copy of the trainer hooks the game if it's installed twice.
 | `CPed::SetArrestPlayer` (0x4EB5F0) | inline jump + trampoline | No busts while never wanted is on, on foot or pulled out of a car. |
 | `CVehicle::KillPedsInVehicle` (0x5B8560) | inline jump + trampoline | *Survive vehicle explosions*: the player is left out of the kill (stay in the wreck) or put beside it first. |
 | `CPed::SetFall` (0x4FD9F0) | inline jump + trampoline | *No ragdoll*: knock-downs of the player are refused. |
+| `CWeapon::Fire` (0x5D45E0) | inline jump + trampoline | Counts the player's shots (wall bang, one-shot vehicles, bullet penetration, special bullets and guns) and applies the damage multiplier and the penetration range. |
+
+Each inline hook checks the function's first bytes against v1.0 before patching. If another mod
+put a jump there, the trainer chains through it; if another mod changed those bytes in any other
+way, that one hook is left out, `VCTrainer.log` records the bytes it found, and the start-up
+help box names the features it switches off. Nothing half-patched ever runs.
 
 ### 3. Drawing ImGui on Direct3D 8
 
@@ -409,9 +487,21 @@ match D3D8's format) and `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` are required.
 ```
 src/
   dllmain.cpp         startup, version check, single-instance guard
-  hooks.cpp           game, input, window and Direct3D 8 hooks; ImGui frame
-  features.cpp/.h     every cheat, the hotkey registry, settings file
-  menu.cpp            the ImGui menu (tabs, styling, overlay)
+  hooks.cpp           game, input, window and Direct3D 8 hooks; ImGui frame; frame timing
+  log.cpp             VCTrainer.log and game-folder paths
+  features.h          the feature interface the menu uses
+  features_internal.h what the feature files share (and the script-command builder)
+  settings.cpp        settings, action queue, hotkeys, settings file, game cheats, Active list, the per-tick driver
+  player.cpp          health, wanted, money, weapons given, skins, invisible / freeze / forcefield, speed meter
+  vehicle.cpp         vehicle list, spawning, repair, doors, heavy car, bikes, explosions, extras, garage
+  combat.cpp          aim lock, shots, drive-by aimbot, genocide, rapid fire, snipers, enemy markers, special guns
+  movement.cpp        super jump / run, bunny hop and surf, walk on water, fly mode
+  teleport.cpp        teleports, free landing spot, blips, pickups, mission marker
+  peds.cpp            script handles, bodyguards, spawned peds, nearby peds
+  world.cpp           time, weather, gravity, clock speed, bullet time, radar, field of view
+  menu.cpp            the ImGui menu: classic window, overlay, enemy markers
+  menu_list.inc       the Menyoo-style list layout and its info panel
+  vehpreview.cpp      vehicle pictures for the spawner, drawn from the game's own models
   tables.h            weapon list and decoded native cheat list
   game.h              all game addresses and structure offsets, with notes
   imgui_impl_dx8.cpp  Dear ImGui renderer for Direct3D 8
@@ -419,9 +509,9 @@ third_party/imgui     Dear ImGui v1.91.8 (git submodule)
 build.bat             build script
 ```
 
-Adding a feature usually means: an address or offset in `game.h`, the logic in
-`features.cpp`, a control in `menu.cpp`, and one line in `HotkeyActions()` so it can be
-bound to a key.
+Adding a feature usually means: an address or offset in `game.h`, the logic in the
+matching feature file, a control in `menu.cpp` and `menu_list.inc`, a settings key in
+`settings.cpp` (`kBools`), and one line in `HotkeyActions()` so it can be bound to a key.
 
 ---
 

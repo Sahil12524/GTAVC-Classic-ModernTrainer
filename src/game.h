@@ -61,6 +61,33 @@ inline auto LineOfSightClear = (bool(__cdecl*)(const float*, const float*, bool,
                                                bool, bool))0x4DA560;
 // CWaterLevel::GetWaterLevelNoWaves(x, y, z, &level): false = no water there
 inline auto WaterLevelAt = (bool(__cdecl*)(float, float, float, float*))0x5C2BE0;
+// CReplay::Mode: 1 while a replay (F1) plays. The game then swaps every ped
+// and vehicle for its recording, so pools, wanted data (cop lists) etc. hold
+// leftover values - nothing may be read or changed until it's back to 0.
+inline unsigned char* const ReplayMode = (unsigned char*)0xA10AF6;
+inline bool ReplayPlaying() { return *ReplayMode == 1; }
+// CRunningScript::ProcessOneCommand: runs the command at the script's
+// instruction pointer (+0x10, an offset into ScriptSpace); locals at +0x30.
+inline auto ProcessOneCommand = (bool(__thiscall*)(void*))0x44FBE0;
+inline float* const TimeStep        = (float*)0x975424;      // CTimer::ms_fTimeStep (1 = 1/50 s)
+inline unsigned* const MsPerGameMinute = (unsigned*)0x97F2B4; // CClock: real ms per game minute (1000)
+inline float* const PhysGravity     = (float*)0x68F5F0;      // CPhysical::ApplyGravity (0x4BA955), 0.008
+inline float* const PedGravity      = (float*)0x6928A8;      // the ped's own fall (0x519171)
+inline auto PedSetFall = (void(__thiscall*)(void*, int, int, bool))0x4FD9F0;   // CPed::SetFall (hooked)
+constexpr int ENT_FLAGS_52 = 0x52, ENT_VISIBLE_BIT = 0x04;
+// Sleeping physicals: bIsStatic (+0x51 bit 0x04) and out of the moving list
+// (node at +0xE0 empty) - the physics skips them, so a speed set on them does
+// nothing until something hits them. The game wakes one (e.g. 0x4D7D50, an
+// explosion reaching it) by clearing the bit and CPhysical::AddToMovingList.
+constexpr int ENT_STATIC_BIT = 0x04, PHYS_MOVING_NODE = 0xE0;
+inline auto AddToMovingList = (void(__thiscall*)(void*))0x4BAE90;
+// Traffic "on rails": status 2 (STATUS_SIMPLE) cars are moved along the road
+// path with no physics at all. An explosion (0x4D8094) switches one to real
+// physics: status 3 and CCarCtrl::SwitchVehicleToRealPhysics (cdecl, 0x41D2D0).
+inline auto SwitchVehicleToRealPhysics = (void(__cdecl*)(void*))0x41D2D0;
+// CMatrix::UpdateRW (ecx = entity + 4): copies the position / rotation to the
+// model the game draws (the physics does it each step; a moved car needs it).
+inline auto MatrixUpdateRW = (void(__thiscall*)(void*))0x4DF8F0;   // bIsVisible (SET_CHAR_VISIBLE, 0x45BB42)
 constexpr int MI_COLMODEL = 0x1C, COL_RADIUS = 0x0C, COL_BOX_MIN = 0x14, COL_BOX_MAX = 0x20;
 constexpr int VEH_FLAGS_1FB = 0x1FB;
 // --- taking a ped out of a vehicle, as script command 0362 (WARP_CHAR_FROM_CAR_TO_COORD) does
@@ -107,6 +134,10 @@ inline auto WarpPedIntoCar     = (Warp_t)      0x4EF8B0; // CPed::WarpPedIntoCar
 inline void* const TheText      = (void*)0x94B220;
 inline void* const Pad0         = (void*)0x7DBCB0;          // CPad::Pads[0]
 inline int*  const Money        = (int*)0x94ADC8;           // Players[0].m_nMoney
+// The story's star limit: SetWantedLevel clamps the level to the first,
+// UpdateWantedLevel clamps the chaos points to the second (6 stars = 4800+).
+inline int*  const MaxWantedLevel = (int*)0x6910D8;         // CWanted::MaximumWantedLevel
+inline int*  const MaxChaosLevel  = (int*)0x6910DC;         // CWanted::MaximumChaosLevel
 inline unsigned char* const MaxHealth = (unsigned char*)0x94AE6B;
 inline unsigned char* const MaxArmour = (unsigned char*)0x94AE6C;
 inline void** const D3DDevice   = (void**)0x7897A8;         // RwD3D8 device
@@ -140,6 +171,8 @@ constexpr int PICKUP_COUNT = 336, PICKUP_SIZE = 0x34;
 constexpr int PICKUP_MODEL = 0x22, PICKUP_TYPE = 0x2E, PICKUP_REMOVED = 0x2F;
 // CPed flag byte: bit 0 bIsStanding, bit 1 bWasStanding (cleared before SetFall 0x4FD9F0)
 constexpr int PED_FLAGS_14C = 0x14C, PED_FALL = 0x2A, PED_GETUP = 0x2B, PED_IDLE = 1;
+// CPed::SetDuck (0x512C10) sets bIsDucking = byte 0x150 bit 0x10 (crouched, e.g. crouch-firing)
+constexpr int PED_FLAGS_150 = 0x150, PED_DUCKING_BIT = 0x10;
 inline unsigned* const OnscnTimerOffset = (unsigned*)0x9B6CF8; // CUserDisplay::OnscnTimer entry 0
 inline void** const ModelInfoPtrs = (void**)0x92D4C8;       // CModelInfo::ms_modelInfoPtrs
 inline unsigned char* const StreamInfo = (unsigned char*)0x94DDD8; // ms_aInfoForModel, stride 20
@@ -152,6 +185,10 @@ inline char* const RadarTrace   = (char*)0x7D7D38;          // CRadar::ms_RadarT
 // TheCamera's matrix: right +0, look direction +0x10, up +0x20, position +0x30
 // (heading code passes 0x7E4698/0x7E469C to GetATanOfXY; pos 0x7E46B8 used as camera x,y).
 inline float* const CameraFront = (float*)0x7E4698;
+// CDraw::ms_fFOV: the field of view the frame is rendered with. CCamera::Process
+// (0x46DCC8) sets it from the active CCam's FOV (+0xB4) every frame via
+// CDraw::SetFOV (0x54A2E0); the renderer and CalcScreenCoors read it afterwards.
+inline float* const DrawFov = (float*)0x696658;
 inline float* const CameraRight = (float*)0x7E4688;
 inline float* const CameraPos   = (float*)0x7E46B8;
 // CSprite::CalcScreenCoors(in, out (pixels; z = depth), &w, &h, farClip): false = behind the camera
@@ -170,6 +207,20 @@ inline char* ActiveCam() { return (char*)0x7E4810 + *(unsigned char*)0x7E46FE * 
 constexpr int CAM_MODE = 0x0C, CAM_ALPHA = 0xAC, CAM_BETA = 0xBC;
 // CCamera::Find3rdPersonCamTargetVector(range, source xyz, &camSource, &camTarget): where the crosshair points
 inline auto Find3rdPersonCamTargetVector = (void(__thiscall*)(void*, float, float, float, float, float*, float*))0x46F890;
+// Its v1.0 entry (push ebx; push esi; push ebp; mov ebp,ecx; sub esp,28h), hooked
+// for the wide FOV (hooks.cpp). Callee pops 0x18. It builds the ray through the
+// crosshair's screen fraction (CrosshairScreenX/Y) with the CCam FOV, not the
+// drawn one; look-behind (CPad::GetLookBehindForPed) makes its own ray.
+constexpr DWORD FIND_3RD_PERSON_TARGET = 0x46F890;
+inline float* const CrosshairScreenX = (float*)0xA0D91C;
+inline float* const CrosshairScreenY = (float*)0xA0D924;
+inline float* const DrawAspectRatio  = (float*)0x94DD38;   // CDraw::ms_fAspectRatio
+inline auto GetPad = (void*(__cdecl*)(int))0x4AB060;
+inline auto GetLookBehindForPed = (bool(__thiscall*)(void*))0x4AAC00;
+// The first-person camera modes: scopes, rocket launcher, first person, etc.
+inline bool IsFirstPersonCamMode(short mode) {
+    return mode == 7 || mode == 8 || mode == 16 || mode == 34 || (mode >= 39 && mode <= 42) || mode == 45 || mode == 46;
+}
 constexpr int PED_ATTACK = 0x10, PED_FIGHT = 0x11, PED_AIM_GUN = 0x16;   // SetAttack 0x52D406, SetFight 0x52ABC4
 // CHeli (police helicopter, vtable 0x69C21C, its BlowUpCar is empty):
 // CHeli::pHelis[4]; status +0x2C0 (3 = shot down, TestBulletCollision
@@ -262,6 +313,57 @@ constexpr int MI_VEHTYPE = 0x3C;    // CVehicleModelInfo: 0 car, 1 boat, 5 bike
 constexpr int WI_RANGE = 0x04, WI_FIRE_RATE = 0x08, WI_DAMAGE = 0x14;   // CWeapon::Fire 0x5D4B7B..
 constexpr int WI_FIRETYPE = 0x00, WI_CLIP = 0x10, WI_MODEL = 0x54, WI_MODEL2 = 0x58;
 constexpr int MODEL_COUNT = 0x1964;   // RequestModel's own bound check
+// CWeaponInfo +0x28: m_vecFireOffset (CVector). CPed's attack code copies it
+// (0x52B86F: lea esi,[ebp+28h]; movsd x3) and, for a gun, transforms it by the
+// right-hand bone's matrix (0x52B950..0x52B98D) before CWeapon::Fire (0x52B9B4).
+constexpr int WI_FIRE_OFFSET = 0x28;
+
+// ---- ped bones (skinned peds) -------------------------------------------------
+// CPed +0x1A8: AnimBlendFrameData* m_pFrames[node]; the frame data's nodeID is
+// +0x14 (0x4FEFB5: mov ebp,[eax+ecx*4+1A8h]; mov eax,[ebp+14h]). Node order
+// (ConvertPedNode2BoneTag 0x405DE0, table 0x685EA0): 1 mid / spine -> bone 3
+// (Spine1), 2 head -> bone 5, 6 right hand -> bone 0x18 (0x52B960 reads +0x1C0).
+// The bone's world matrix: RpHAnimIDGetIndex(hier, nodeID) (0x646390) into the
+// hierarchy's matrix array (+8, RpHAnimHierarchyGetMatrixArray 0x646370), 0x40
+// bytes each (RwMatrix: right +0, up +0x10, at +0x20, pos +0x30) - the code
+// at 0x52B935..0x52B98D. The ped's hit spheres are built from the same bones
+// (0x566079.., table 0x698968: head, three on the spine, arms, legs, feet), so
+// a ped lying on the ground is hit where its bones are.
+constexpr int PED_FRAMES = 0x1A8, FRAMEDATA_NODE_ID = 0x14;
+constexpr int PED_NODE_MID = 1, PED_NODE_HEAD = 2, PED_NODE_HANDR = 6;
+constexpr int HIER_NUM_NODES = 0x04, HIER_MATRICES = 0x08, HIER_CURRENT_ANIM = 0x20;
+inline auto IsClumpSkinned  = (unsigned char(__cdecl*)(void* clump))0x57F580;
+inline auto SkinHierarchy   = (char*(__cdecl*)(void* clump))0x57F250;   // GetAnimHierarchyFromSkinClump
+inline auto HAnimIDGetIndex = (int(__cdecl*)(void* hier, int nodeID))0x646390;
+// CEntity::UpdateRpHAnim: RpHAnimHierarchyUpdateMatrices on the clump's
+// hierarchy - the bone matrices from the current pose and position.
+inline auto EntityUpdateRpHAnim = (void(__thiscall*)(void*))0x489330;
+
+// ---- camera / mouse ---------------------------------------------------------------
+// CCam FOV +0xB4. The mouse turn per count: Beta -= X * 2.5 * SensH * FOV / 80,
+// Alpha += Y * 4 * SensV * FOV / 80 (0x47C09F; VCModernFix mouselook YawFor).
+constexpr int CAM_FOV = 0xB4;
+// The processed CCam vectors CCamera::Find3rdPersonCamTargetVector reads for
+// the mouse crosshair (0x46F921..0x46FA19: Front +0x168, Source +0x174, Up
+// +0x18C of Cams[ActiveCam]). CWeapon::FireInstantHit takes the player's
+// bullet line from there, so it follows the camera as last processed - not a
+// Beta / Alpha written since.
+constexpr int CAM_FRONT = 0x168, CAM_SOURCE = 0x174, CAM_UP = 0x18C;
+// CCam::Process_FollowPedWithMouse (mode 4, the on-foot mouse camera) clamps
+// Alpha: above [0x68B038] = 0.7853982 it stores 0x3F490FDB (0x47C293..0x47C2A2),
+// below -[0x68B010] = -1.5620697 it stores that (0x47C2AE..0x47C2C8).
+constexpr int CAM_MODE_FOLLOWPED = 4;
+// CWeapon::FireSniper (0x5CC730, from CWeapon::Fire at 0x5D4796): fires only
+// in camera modes 34, 7, 46, 8, 42, 39, 40 (0x5CC768..0x5CC790); takes the
+// active CCam's Source (+0x174) and Front (+0x168), normalises Front
+// (0x4DFEA0), times 16.0 ([0x69D48C]) and adds a travelling bullet with
+// CBulletInfo::AddBullet (0x5C47C0): 16 units per 1/50 s step, not an instant line.
+constexpr float SNIPER_BULLET_SPEED = 16.0f;
+constexpr float CAM_PITCH_MAX = 0.7853982f, CAM_PITCH_MIN = -1.5620697f;
+inline float* const MouseSensH = (float*)0x94DBD0;
+inline float* const MouseSensV = (float*)0xA0D964;
+// CMouseControllerState: buttons +0 LMB, +1 RMB, +2 MMB, +3 wheel up, +4 wheel down; x +8, y +0xC (floats)
+constexpr int MOUSE_WHEEL_UP = 3, MOUSE_WHEEL_DOWN = 4;
 
 // ---- hook sites ------------------------------------------------------------
 constexpr DWORD HOOK_PROCESS_SITE = 0x4A5DA0, GAME_PROCESS = 0x4A4410; // main loop -> CGame::Process

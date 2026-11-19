@@ -4,6 +4,7 @@
 #include "trainer.h"
 #include "game.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_dx8.h"
 #include "tables.h"
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <functional>
 #include <windows.h>
 
 // ------------------------------------------------------------------ style
@@ -53,44 +56,270 @@ void ApplyTrainerStyle() {
     c[ImGuiCol_TextDisabled]     = ImVec4(0.58f, 0.54f, 0.64f, 1.00f);
 }
 
+// Classic layout helpers. The window was laid out for a 13 px font; these
+// scale with the real font and the window width instead of fixed pixels.
+static float Wd(float px) {                       // a width given at 13 px, scaled, never wider than the space left
+    float w = px * ImGui::GetFontSize() / 13.0f;
+    float avail = ImGui::GetContentRegionAvail().x;
+    return avail > 40 && w > avail ? avail : w;
+}
+// Next item in column i (of 3) on the same line - or on a new line when the
+// previous item already reaches past that column.
+static void Col(int i) {
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    float org = w->Pos.x - w->Scroll.x;                    // SameLine() measures from here
+    float lo = w->WorkRect.Min.x - org, hi = w->WorkRect.Max.x - org;
+    float x = lo + (hi - lo) * i / 3.0f;
+    float prevEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + ImGui::GetScrollX();
+    if (prevEnd + ImGui::GetStyle().ItemSpacing.x * 2 > x) return;
+    ImGui::SameLine(x);
+}
+static const ImVec4 kAccent(0.96f, 0.30f, 0.62f, 1.0f), kAccent2(0.20f, 0.80f, 0.86f, 1.0f);
 static void Section(const char* title) {
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.10f, 0.74f, 0.80f, 1.0f), "%s", title);
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.35f));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float h = ImGui::GetTextLineHeight();
+    dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + 3, p.y + h - 1), ImGui::GetColorU32(kAccent), 2.0f);
+    ImGui::SetCursorScreenPos(ImVec2(p.x + 10, p.y));
+    ImGui::TextColored(kAccent2, "%s", title);
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float right = ImGui::GetCurrentWindow()->WorkRect.Max.x;
+    dl->AddLine(ImVec2(p.x, q.y + 1), ImVec2(right, q.y + 1), ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+    ImGui::Dummy(ImVec2(0, 4));
 }
 
 static void ProofsUI(const char* id, Proofs& p, bool vehicle) {
     ImGui::PushID(id);
-    ImGui::Checkbox("Bulletproof", &p.bullet);   ImGui::SameLine(160);
-    ImGui::Checkbox("Fireproof", &p.fire);       ImGui::SameLine(310);
+    ImGui::Checkbox("Bulletproof", &p.bullet);   Col(1);
+    ImGui::Checkbox("Fireproof", &p.fire);       Col(2);
     ImGui::Checkbox("Explosion proof", &p.explosion);
-    ImGui::Checkbox(vehicle ? "Solid (collision proof)" : "Collision proof", &p.collision); ImGui::SameLine(vehicle ? 220 : 160);
+    ImGui::Checkbox(vehicle ? "Solid (collision proof)" : "Collision proof", &p.collision); Col(1);
     ImGui::Checkbox("Melee proof", &p.melee);
     ImGui::PopID();
 }
 
 // ------------------------------------------------------------------ tabs
+// ---- extras: shared lists -------------------------------------------------------
+struct NamedId { const char* name; int id; };
+static const NamedId kOutfits[] = {
+    { "Street (Hawaiian shirt)", 0 }, { "Soiree", 2 }, { "Coveralls", 3 }, { "Country Club", 4 },
+    { "Havana", 5 }, { "Cop", 6 }, { "Bank Job", 7 }, { "Casual", 8 }, { "Mr Vercetti", 9 },
+};
+static const NamedId kGuardWeapons[] = {
+    { "None", 0 }, { "Pistol", 17 }, { "Python", 18 }, { "Shotgun", 19 }, { "Uzi", 23 }, { "MP5", 25 },
+    { "M4", 26 }, { "Ruger", 27 }, { "M60", 32 }, { "Minigun", 33 }, { "Rocket launcher", 30 },
+    { "Flamethrower", 31 }, { "Katana", 10 }, { "Chainsaw", 11 },
+};
+static const NamedId kGuardTypes[] = {
+    { "Cop", 1 }, { "SWAT", 2 }, { "FBI", 3 }, { "Army", 4 }, { "Vice Squad", 97 },
+    { "Cuban", 83 }, { "Haitian", 85 }, { "Streetwannabe", 87 }, { "Diaz gang", 89 },
+    { "Security", 91 }, { "Biker", 93 }, { "Golfer", 95 },
+};
+
+static bool Combo(const char* label, int* idx, const NamedId* items, int n, float width = 180) {
+    ImGui::SetNextItemWidth(width);
+    return ImGui::Combo(label, idx, [](void* d, int i) { return ((const NamedId*)d)[i].name; }, (void*)items, n);
+}
+
+// A searchable ped model list (data\default.ide).
+static bool PedModelPicker(const char* id, int* model) {
+    static char filter[32] = {};
+    const auto& list = PedModels();
+    bool picked = false;
+    ImGui::PushID(id);
+    ImGui::SetNextItemWidth(Wd(140));
+    ImGui::InputTextWithHint("##f", "search model", filter, sizeof filter);
+    ImGui::SameLine();
+    const char* cur = "?";
+    for (auto& m : list) if (m.id == *model) cur = m.name.c_str();
+    ImGui::SetNextItemWidth(Wd(160));
+    if (ImGui::BeginCombo("##m", cur)) {
+        for (auto& m : list) {
+            if (filter[0]) {
+                std::string a = m.name, b = filter;
+                for (auto& c : a) c = (char)tolower(c);
+                for (auto& c : b) c = (char)tolower(c);
+                if (a.find(b) == std::string::npos) continue;
+            }
+            char lbl[64]; snprintf(lbl, sizeof lbl, "%s (%d)", m.name.c_str(), m.id);
+            if (ImGui::Selectable(lbl, m.id == *model)) { *model = m.id; picked = true; }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopID();
+    return picked;
+}
+
+static void PlayerExtras() {
+    Section("Special");
+    ImGui::Checkbox("Invisible", &S.invisible); Col(1);
+    ImGui::Checkbox("Freeze position", &S.freezePos);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Holds you - or the vehicle you're in - exactly where you are, even in the air.");
+    Col(2);
+    ImGui::Checkbox("Forcefield", &S.forcefield);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Everything that comes near you is dealt with: pushed away, or destroyed.\n"
+                          "Rockets and grenades are pushed off you either way.");
+    if (S.forcefield) {
+        ImGui::Indent();
+        ImGui::RadioButton("Push away", &S.forcefieldMode, 0);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Everything within 10 m (like Menyoo): people are knocked over and thrown\n"
+                                                      "back, cars and loose objects are thrown away - the closer, the harder.");
+        ImGui::SameLine();
+        ImGui::RadioButton("Destroy", &S.forcefieldMode, 1);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Everything within 5 m (like Menyoo's explode mode): cars blow up and people die.");
+        ImGui::Unindent();
+    }
+}
+
+static void WeaponExtras() {
+    Section("Bullets & special guns");
+    ImGui::Checkbox("Explosive bullets", &S.explosiveBullets); Col(1);
+    ImGui::Checkbox("Fire bullets", &S.fireBullets);              Col(2);
+    ImGui::Checkbox("Super punch", &S.superPunch);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fists and melee weapons send people flying, and shove cars.");
+    ImGui::Checkbox("Teleport gun", &S.teleportGun);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("You jump to wherever your shot lands.");
+    Col(1);
+    ImGui::Checkbox("Delete gun", &S.deleteGun);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("People and vehicles you shoot vanish (never yours, never with you inside).");
+    Col(2);
+    ImGui::Checkbox("Vehicle gun", &S.vehicleGun);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every shot fires a random car out in front of you.");
+    ImGui::SetNextItemWidth(Wd(200));
+    ImGui::SliderFloat("Damage multiplier", &S.damageMult, 0.1f, 20.0f, "x%.1f", ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How hard your bullets hit. Only your shots - enemies' guns stay normal.");
+    ImGui::SameLine();
+    if (ImGui::Button("Default##dmg")) S.damageMult = 1.0f;
+    ImGui::SameLine();
+    if (ImGui::Button("Remove all weapons")) Queue([] { RemoveAllWeapons(); });
+}
+
+static void VehicleExtras() {
+    void* veh = PlayerVehicle();
+    Section("Extras");
+    ImGui::Checkbox("Rainbow paint", &S.rainbowCar); Col(1);
+    ImGui::Checkbox("Bulletproof tyres", &S.bulletproofTyres); Col(2);
+    ImGui::Checkbox("Invisible vehicle", &S.invisibleCar);
+    if (ImGui::Button(veh ? "Delete this vehicle" : "Delete nearest vehicle")) Queue([] { DeleteVehicle(); });
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("In a vehicle: you're set down beside it and it disappears.\nOn foot: the nearest one within 10 m.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Freeze vehicle in place", &S.freezePos);
+
+    Section("Performance");
+    ImGui::SetNextItemWidth(Wd(180)); ImGui::SliderFloat("Acceleration", &S.carAccel, 1.0f, 5.0f, "x%.1f"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(Wd(180)); ImGui::SliderFloat("Grip", &S.carGrip, 1.0f, 5.0f, "x%.1f");
+    ImGui::SetNextItemWidth(Wd(180)); ImGui::SliderFloat("Brakes", &S.carBrakes, 1.0f, 5.0f, "x%.1f"); ImGui::SameLine();
+    if (ImGui::Button("Stock##perf")) S.carAccel = S.carGrip = S.carBrakes = 1.0f;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extra pull, less sliding and stronger brakes for whatever you drive.");
+
+    Section("Garage");
+    static char gname[48] = {};
+    ImGui::SetNextItemWidth(Wd(200));
+    ImGui::InputTextWithHint("##gname", "name (optional)", gname, sizeof gname);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!veh);
+    if (ImGui::Button("Save this vehicle")) { std::string n = gname; gname[0] = 0; Queue([n] { GarageSave(n.c_str()); }); }
+    ImGui::EndDisabled();
+    auto& g = Garage();
+    if (g.empty()) ImGui::TextDisabled("No saved vehicles yet - get in one you like and save it.");
+    for (int i = 0; i < (int)g.size(); i++) {
+        ImGui::PushID(i + 7000);
+        ImGui::Text("%s", g[i].name.c_str()); Col(2);
+        if (ImGui::SmallButton("Spawn")) Queue([i] { GarageSpawn(i); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) Queue([i] { GarageRemove(i); });
+        ImGui::PopID();
+    }
+}
+
+static void WorldExtras() {
+    Section("Physics & fun");
+    ImGui::SetNextItemWidth(Wd(200));
+    ImGui::SliderFloat("Gravity", &S.gravity, 0.1f, 3.0f, "x%.2f");
+    ImGui::SameLine(); if (ImGui::Button("Normal##grav")) S.gravity = 1.0f;
+    ImGui::SetNextItemWidth(Wd(200));
+    ImGui::SliderFloat("Clock speed", &S.clockSpeed, 0.1f, 20.0f, "x%.1f", ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the in-game clock runs (game speed stays the same).");
+    ImGui::SameLine(); if (ImGui::Button("Normal##clock")) S.clockSpeed = 1.0f;
+    ImGui::Checkbox("Bullet time", &S.bulletTime);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slow motion while you aim (right mouse) on foot.");
+    Col(1);
+    ImGui::Checkbox("Hide radar", &S.hideRadar);
+
+}
+
+static void PedsTab() {
+    Section("Bodyguards");
+    static int type = 4, weapon = 6, count = 3;
+    Combo("Who", &type, kGuardTypes, IM_ARRAYSIZE(kGuardTypes), 160); ImGui::SameLine();
+    Combo("Weapon##bg", &weapon, kGuardWeapons, IM_ARRAYSIZE(kGuardWeapons), 140);
+    ImGui::SetNextItemWidth(Wd(160)); ImGui::SliderInt("How many", &count, 1, 8);
+    ImGui::SameLine();
+    if (ImGui::Button("Spawn bodyguards")) {
+        int m = kGuardTypes[type].id, w = kGuardWeapons[weapon].id, c = count;
+        Queue([m, w, c] { SpawnBodyguards(m, c, w); });
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("They follow you on foot and get in your car with you, and go for anyone\n"
+                          "who attacks you (or the police while you're wanted).");
+    ImGui::SameLine();
+    if (ImGui::Button("Dismiss")) Queue([] { DismissBodyguards(); });
+    ImGui::TextDisabled("Bodyguards with you: %d", BodyguardCount());
+
+    Section("Spawn a ped");
+    static int pmodel = 83, pweapon = 1, mood = 0;
+    PedModelPicker("spawn", &pmodel);
+    Combo("Weapon##sp", &pweapon, kGuardWeapons, IM_ARRAYSIZE(kGuardWeapons), 140); ImGui::SameLine();
+    ImGui::RadioButton("Friendly", &mood, 0); ImGui::SameLine();
+    ImGui::RadioButton("Hostile (comes after you)", &mood, 1);
+    if (ImGui::Button("Spawn")) { int m = pmodel, w = kGuardWeapons[pweapon].id; bool h = mood == 1; Queue([m, w, h] { SpawnPed(m, h, w); }); }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove the ones I spawned")) Queue([] { RemoveSpawnedPeds(); });
+
+    Section("Everyone within 40 m");
+    if (ImGui::Button("Set on fire")) Queue([] { NearbyPeds(NEARBY_FIRE); }); ImGui::SameLine();
+    if (ImGui::Button("Freeze")) Queue([] { NearbyPeds(NEARBY_FREEZE); }); ImGui::SameLine();
+    if (ImGui::Button("Unfreeze")) Queue([] { NearbyPeds(NEARBY_UNFREEZE); }); ImGui::SameLine();
+    if (ImGui::Button("Fight each other")) Queue([] { NearbyPeds(NEARBY_RIOT); });
+    if (ImGui::Button("Follow me")) Queue([] { NearbyPeds(NEARBY_RECRUIT); }); ImGui::SameLine();
+    if (ImGui::Button("Delete")) Queue([] { NearbyPeds(NEARBY_DELETE); });
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("People on foot only - anyone a mission marks on the radar is left alone.");
+}
+
 static void PlayerTab() {
     void* ped = PlayerPed();
     if (!ped) { ImGui::TextDisabled("Player not available."); return; }
     using namespace game;
 
     Section("Cheats");
-    ImGui::Checkbox("Infinite health", &S.godMode);      ImGui::SameLine(200);
+    ImGui::Checkbox("Infinite health", &S.godMode);      Col(1);
     ImGui::Checkbox("Infinite armour", &S.infiniteArmour);
-    ImGui::Checkbox("Never wanted", &S.neverWanted);     ImGui::SameLine(200);
-    ImGui::Checkbox("Infinite ammo", &S.infiniteAmmo);   ImGui::SameLine(380);
+    ImGui::Checkbox("Never wanted", &S.neverWanted);     Col(1);
+    ImGui::Checkbox("Infinite ammo", &S.infiniteAmmo);   Col(2);
     ImGui::Checkbox("No reload", &S.noReload);
-    ImGui::Checkbox("Wall bang", &S.wallBang); ImGui::SameLine(200);
+    ImGui::Checkbox("Wall bang", &S.wallBang); Col(1);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Your bullets go through walls, cars, wrecks and anything else:\n"
                           "whoever is on the crosshair line behind it gets hit.");
     ImGui::Checkbox("One-shot vehicles", &S.oneShotVehicles);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Any vehicle you shoot or hit with a rocket blows up at once -\n"
+                          "tanks, helicopters, armoured trucks, everything. Yours is never touched.");
+    Col(2);
+    ImGui::Checkbox("Bullet penetration", &S.bulletPenetrate);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every gun: bullets fly up to 500 m and pass through walls, cars and people,\n"
+                          "hitting everyone and every vehicle on the crosshair line.");
     ImGui::Checkbox("Rapid fire", &S.rapidFire);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Hold the fire button and any gun keeps shooting, about 22 shots a second -\n"
-                          "pistols and shotguns too. Reloads still happen unless No reload is on.");
-    ImGui::SameLine(200);
+                          "pistols and shotguns too, and drive-bys from a vehicle. Reloads still happen\n"
+                          "unless No reload is on.");
+    Col(1);
     ImGui::Checkbox("No-scope sniper", &S.noScopeSniper);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Sniper, laser sniper and rocket launcher without the scope / sight: one left click fires down your\n"
@@ -101,16 +330,54 @@ static void PlayerTab() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Sniper, laser sniper and rocket launcher: hold the fire button and it keeps firing at full speed,\n"
                           "in the scope or (with No-scope sniper) from the hip - no tapping.");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Any vehicle you shoot or hit with a rocket blows up at once -\n"
-                          "tanks, helicopters, armoured trucks, everything. Yours is never touched.");
-    ImGui::Checkbox("Infinite sprint", &S.neverTired);   ImGui::SameLine(200);
-    ImGui::Checkbox("Fast reload", &S.fastReload);       ImGui::SameLine(380);
+    ImGui::Checkbox("Infinite sprint", &S.neverTired);   Col(1);
+    ImGui::Checkbox("Fast reload", &S.fastReload);       Col(2);
     ImGui::Checkbox("Aim lock-on", &S.aimLock);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("While you aim (right mouse), the crosshair snaps onto the closest enemy\n"
                           "anywhere around you (360 degrees): every gang member, cop and criminal, and\n"
                           "anyone attacking you - even knocked to the ground. Your own followers are left alone.");
+    // aim lock options, right under it
+    ImGui::Indent(20);
+    ImGui::BeginDisabled(!S.aimLock && !S.aimDriveBy);
+    ImGui::Checkbox("Silent aim", &S.aimSilent);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("The camera is never turned: you aim where you like and your shots land on\n"
+                          "the locked enemy anyway (right mouse or just the fire button).\n"
+                          "Also used by the drive-by aimbot.");
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!S.aimLock && !S.aimDriveBy);
+    Col(1);
+    ImGui::BeginDisabled(S.aimSilent);
+    ImGui::Checkbox("Silent aim while hopping", &S.aimSilentBhop);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Silent aim only while auto bunny hopping, so the lock never turns your run.\n"
+                          "Off: the camera swings onto enemies mid-hop too (it steers the hop).\n"
+                          "(Already covered when Silent aim is on.)");
+    ImGui::EndDisabled();
+    Col(2);
+    ImGui::BeginDisabled(S.aimSilent);
+    ImGui::Checkbox("Snap camera back", &S.aimSnapBack);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("When you stop aiming, or no enemy is left, the camera turns back to\n"
+                          "where you were looking before the lock grabbed it.\n"
+                          "(Not needed with silent aim: the camera never moves.)");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Drive-by aimbot", &S.aimDriveBy);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The aim lock for drive-bys (driver, passenger seat, bikes). Hold the right\n"
+                          "mouse button (otherwise drive-bys are normal) and the camera locks onto the closest\n"
+                          "enemy all round (gangs, police when wanted, criminals, attackers) and every\n"
+                          "bullet lands on them. Works with or without Aim lock-on, and uses its Silent aim\n"
+                          "(camera never turned) and Snap camera back settings.");
+    ImGui::Unindent(20);
+    ImGui::Checkbox("Walk on water", &S.walkOnWater);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("On foot, the sea, rivers and pools are solid ground: walk, run, jump and\n"
+                          "land on them like land - you never fall in or drown. Fall in from any height\n"
+                          "and you land on the surface; already under water, you pop up onto it.");
+    Col(1);
     ImGui::Checkbox("No ragdoll", &S.noRagdoll);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("You're never knocked down: cars, explosions, punches and falls\n"
@@ -122,11 +389,11 @@ static void PlayerTab() {
                           "and arrows round the screen for the ones behind you or off to the side.");
 
     Section("Movement");
-    ImGui::Checkbox("Super jump", &S.superJump); ImGui::SameLine(200);
-    ImGui::SetNextItemWidth(200);
+    ImGui::Checkbox("Super jump", &S.superJump); Col(1);
+    ImGui::SetNextItemWidth(Wd(200));
     ImGui::SliderFloat("Jump power", &S.superJumpPower, 1.5f, 8.0f, "%.1fx");
-    ImGui::Checkbox("Super run", &S.superRun); ImGui::SameLine(200);
-    ImGui::SetNextItemWidth(200);
+    ImGui::Checkbox("Super run", &S.superRun); Col(1);
+    ImGui::SetNextItemWidth(Wd(200));
     ImGui::SliderFloat("Run speed", &S.superRunSpeed, 1.2f, 5.0f, "%.1fx");
     ImGui::Checkbox("Auto bunny hop", &S.autoBhop);
     if (ImGui::IsItemHovered())
@@ -138,12 +405,21 @@ static void PlayerTab() {
         ImGui::RadioButton("Any direction", &S.bhopMode, 0); ImGui::SameLine();
         ImGui::RadioButton("AFH (forward)", &S.bhopMode, 1); ImGui::SameLine();
         ImGui::RadioButton("ABH (backward)", &S.bhopMode, 2);
-        ImGui::SetNextItemWidth(200);
+        ImGui::SetNextItemWidth(Wd(200));
         ImGui::SliderFloat("Speed gain per hop", &S.bhopGain, 1.0f, 1.5f, "x%.2f");
-        ImGui::SetNextItemWidth(200);
+        ImGui::SetNextItemWidth(Wd(200));
         ImGui::SliderFloat("Top hop speed", &S.bhopMax, 10.0f, 150.0f, "%.0f m/s");
-        ImGui::SetNextItemWidth(200);
+        ImGui::SetNextItemWidth(Wd(200));
         ImGui::SliderFloat("Hop height", &S.bhopHeight, 0.5f, 4.0f, "%.2f m");
+        ImGui::Checkbox("Instant full speed", &S.bhopInstant);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("No build-up: from the first hop you move at the top hop speed (slider above).\n"
+                              "W turns the hop to where you look, S the other way; A / D are normal air strafing.");
+        Col(1);
+        ImGui::Checkbox("Keep speed on walls", &S.bhopKeepSpeed);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Hitting a wall never slows you down: you slide along it at the same speed,\n"
+                              "even head-on (it turns along the wall the way your camera leans).");
         ImGui::Checkbox("Surf on steep ramps", &S.bhopSurf);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Like CS:GO surf: land on a ramp steeper than about 45 degrees and you slide along it\n"
@@ -151,6 +427,7 @@ static void PlayerTab() {
         ImGui::SameLine();
         if (ImGui::Button("CS:GO feel")) {
             S.bhopMode = 0; S.bhopGain = 1.0f; S.bhopHeight = 1.45f; S.bhopMax = 89.0f; S.bhopSurf = true;
+            S.bhopInstant = false; S.bhopKeepSpeed = false;
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("CS:GO's own numbers: speed only from air strafing (no gain per hop),\n"
@@ -166,7 +443,7 @@ static void PlayerTab() {
     Section("Fly mode (no clip)");
     ImGui::Checkbox("Fly", &S.flyMode);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
+    ImGui::SetNextItemWidth(Wd(200));
     ImGui::SliderFloat("Speed", &S.flySpeed, 5.0f, 150.0f, "%.0f m/s");
     ImGui::TextDisabled("W/S forward/back where the camera looks, A/D sideways, Space up, Ctrl down,\n"
                         "hold Shift for 3x speed. Goes through walls and works in a vehicle too.\n"
@@ -178,21 +455,21 @@ static void PlayerTab() {
     Section("Health & armour");
     float maxH = (float)*MaxHealth, maxA = (float)*MaxArmour;
     float hp = at<float>(ped, PED_HEALTH), ar = at<float>(ped, PED_ARMOUR);
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderFloat("Health", &hp, 0.0f, maxH, "%.0f")) Queue([hp] { SetHealth(hp); });
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderFloat("Armour", &ar, 0.0f, maxA, "%.0f")) Queue([ar] { SetArmour(ar); });
     if (ImGui::Button("Fill health")) Queue([maxH] { SetHealth(maxH); }); ImGui::SameLine();
     if (ImGui::Button("Fill armour")) Queue([maxA] { SetArmour(maxA); });
     int mh = *MaxHealth, ma = *MaxArmour;
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderInt("Max health", &mh, 100, 250)) Queue([mh] { SetMaxHealth(mh); });
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderInt("Max armour", &ma, 100, 250)) Queue([ma] { SetMaxArmour(ma); });
 
     Section("Wanted level");
     int wanted = GetWanted();
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderInt("Stars", &wanted, 0, 6)) Queue([wanted] { SetWanted(wanted); });
     ImGui::SameLine();
     if (ImGui::Button("Clear")) Queue([] { SetWanted(0); });
@@ -201,7 +478,7 @@ static void PlayerTab() {
         ImGui::SetTooltip("The wanted level can still go up, but never past the number of stars chosen here.\n"
                           "Never wanted (in Cheats) overrides it with zero.");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(150);
+    ImGui::SetNextItemWidth(Wd(150));
     ImGui::SliderInt("stars##cap", &S.wantedCap, 0, 6);
 
     Section("Money");
@@ -214,21 +491,22 @@ static void PlayerTab() {
         if (ImGui::Button(labels[i])) Queue([a] { AddMoney(a); });
     }
     static int setTo = 10000;
-    ImGui::SetNextItemWidth(160);
+    ImGui::SetNextItemWidth(Wd(160));
     ImGui::InputInt("##money", &setTo, 1000, 100000);
     ImGui::SameLine();
     if (ImGui::Button("Set money")) { int v = setTo; Queue([v] { SetMoney(v); }); }
     ImGui::SameLine();
     if (ImGui::Button("Take $10K")) Queue([] { AddMoney(-10000); });
+    PlayerExtras();
 }
 
 
 static void WeaponsTab() {
     static int ammoOverride = 0;
     Section("Options");
-    ImGui::Checkbox("Infinite ammo", &S.infiniteAmmo); ImGui::SameLine(200);
+    ImGui::Checkbox("Infinite ammo", &S.infiniteAmmo); Col(1);
     ImGui::Checkbox("No reload", &S.noReload);
-    ImGui::SetNextItemWidth(160);
+    ImGui::SetNextItemWidth(Wd(160));
     ImGui::InputInt("Ammo to give (0 = default)", &ammoOverride, 50, 500);
     if (ammoOverride < 0) ammoOverride = 0;
 
@@ -236,6 +514,8 @@ static void WeaponsTab() {
     if (ImGui::Button("Set 1 - Thug"))         Queue([] { RunNativeCheat("THUGSTOOLS"); });         ImGui::SameLine();
     if (ImGui::Button("Set 2 - Professional")) Queue([] { RunNativeCheat("PROFESSIONALTOOLS"); });  ImGui::SameLine();
     if (ImGui::Button("Set 3 - Nutter"))       Queue([] { RunNativeCheat("NUTTERTOOLS"); });
+
+    WeaponExtras();
 
     Section("Give weapon");
     ImGui::BeginChild("weapons", ImVec2(0, 0), ImGuiChildFlags_None);
@@ -274,15 +554,16 @@ static void VehicleTab() {
     if (ImGui::Button("Jump")) Queue([] { JumpVehicle(0.35f); });   ImGui::SameLine();
     if (ImGui::Button("Stop")) Queue([] { StopVehicle(); });
     ImGui::EndDisabled();
-    ImGui::Checkbox("Car god mode (health)", &S.carGodMode); ImGui::SameLine(250);
+    ImGui::Checkbox("Car god mode (health)", &S.carGodMode); Col(1);
     ImGui::Checkbox("Auto repair", &S.autoRepair);
     ImGui::Checkbox("Never fall off bike", &S.stayOnBike);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Crashes, hits and shots no longer throw you off a motorbike.");
-    ImGui::SameLine(250);
+    Col(1);
     ImGui::Checkbox("Heavy car (like the Rhino)", &S.heavyCar);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Your car gets the Rhino tank's weight, so it shoves other cars aside.\n"
-                          "Your car's normal weight comes back when you turn this off or get out.");
+        ImGui::SetTooltip("Your car or bike gets the Rhino tank's weight, so it shoves other cars aside.\n"
+                          "Only cars and bikes: boats, helicopters and planes are left alone.\n"
+                          "Your vehicle's normal weight comes back when you turn this off or get out.");
     ImGui::Checkbox("Survive vehicle explosions", &S.surviveBlowUp);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("If the car, bike, boat or helicopter you're in blows up, you don't die:\n"
@@ -298,10 +579,17 @@ static void VehicleTab() {
         ImGui::RadioButton("Thrown clear beside it", &S.blowUpMode, 1);
         ImGui::Unindent();
     }
-    ImGui::Checkbox("Auto flip car", &S.autoFlip);
+    ImGui::Checkbox("Auto flip car / boat", &S.autoFlip);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Cars only (not bikes). As soon as your car is on its roof on the ground,\n"
-                          "it is turned back onto its wheels and keeps going. Never while it's in the air.");
+        ImGui::SetTooltip("Cars and boats (not bikes). As soon as your car is on its roof on the ground,\n"
+                          "or your boat is upside down on the water, it is turned back over and keeps\n"
+                          "going. Never while it's in the air.");
+    ImGui::Checkbox("Hunter aimbot", &S.heliAimbot);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("In a Hunter or Sea Sparrow, hold fire: the targets marked on the radar\n"
+                          "(the vigilante mission's criminals) are taken out one by one, nearest\n"
+                          "first, up to 250 m away and in sight. Cars blow up with the criminals in\n"
+                          "them. The mission counts every kill. Friends and other markers are left alone.");
     ImGui::Checkbox("Kill peds on one touch", &S.touchKill);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("While you drive any vehicle, a pedestrian it touches dies at once,\n"
@@ -339,7 +627,14 @@ static void VehicleTab() {
         }
     }
 
-    Section("Spawn vehicle");
+    VehicleExtras();
+
+}
+
+// Spawner: a gallery of square tiles, each a still picture of the vehicle
+// rendered from the game's own model (no image files), with its name.
+// Click a tile to select it, double-click (or Spawn) to spawn it.
+static void SpawnerTab() {
     static int cat = 0, selected = -1;
     static char filter[32] = "";
     const char* cats[] = { "Cars", "Bikes", "Boats", "Helicopters", "RC" };
@@ -350,52 +645,237 @@ static void VehicleTab() {
         if (ImGui::Button(cats[i])) { cat = i; selected = -1; }
         if (on) ImGui::PopStyleColor();
     }
-    ImGui::SetNextItemWidth(220);
+    ImGui::SetNextItemWidth(Wd(220));
     ImGui::InputTextWithHint("##filter", "Search...", filter, sizeof filter);
     ImGui::SameLine();
-    ImGui::BeginDisabled(selected < 0);
-    if (ImGui::Button("Spawn", ImVec2(110, 0))) { int m = selected; Queue([m] { SpawnVehicle(m); }); }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
     ImGui::Checkbox("Put me in it", &S.warpIntoSpawned);
-    if (cat == CAT_BOATS) ImGui::TextDisabled("Boats spawn in front of you - stand near water.");
 
-    ImGui::BeginChild("vehlist", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    // the vehicles shown: this category, matching the search
+    std::vector<const VehicleEntry*> items;
+    std::string f = filter;
+    for (auto& ch : f) ch = (char)tolower(ch);
+    const VehicleEntry* sel = nullptr;
     for (auto& v : VehicleList()) {
         if (v.category != cat) continue;
-        if (filter[0]) {
-            std::string a = v.name, b = filter;
+        if (!f.empty()) {
+            std::string a = v.name;
             for (auto& ch : a) ch = (char)tolower(ch);
-            for (auto& ch : b) ch = (char)tolower(ch);
-            if (a.find(b) == std::string::npos) continue;
+            if (a.find(f) == std::string::npos) continue;
         }
-        ImGui::PushID(v.model);
-        if (ImGui::Selectable(v.name.c_str(), selected == v.model, ImGuiSelectableFlags_AllowDoubleClick)) {
-            selected = v.model;
-            if (ImGui::IsMouseDoubleClicked(0)) { int m = v.model; Queue([m] { SpawnVehicle(m); }); }
+        items.push_back(&v);
+        if (v.model == selected) sel = &v;
+    }
+    auto shortName = [](const std::string& n) { size_t k = n.find("  ("); return k == std::string::npos ? n : n.substr(0, k); };
+
+    ImGui::BeginDisabled(!sel);
+    if (ImGui::Button("Spawn", ImVec2(Wd(110), 0)) && sel) { int m = sel->model; Queue([m] { SpawnVehicle(m); }); }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (sel) ImGui::TextUnformatted(shortName(sel->name).c_str());
+    else ImGui::TextDisabled(cat == CAT_BOATS ? "Boats spawn in front of you - stand near water."
+                                              : "Click a vehicle to select it, double-click to spawn it.");
+
+    ImGui::BeginChild("vehgrid", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    const ImGuiStyle& st = ImGui::GetStyle();
+    float gap = st.ItemSpacing.x;
+    float avail = ImGui::GetContentRegionAvail().x;
+    float tile = ImGui::GetFontSize() * 8.0f;
+    int cols = (int)((avail + gap) / (tile + gap));
+    if (cols < 1) cols = 1;
+    tile = (avail - gap * (cols - 1)) / cols;                      // fill the width evenly
+    float textH = ImGui::GetTextLineHeight();
+    float tileH = tile + textH + 8;
+    int rows = ((int)items.size() + cols - 1) / cols;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGuiListClipper clip;
+    clip.Begin(rows, tileH + st.ItemSpacing.y);
+    while (clip.Step()) {
+        for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
+            for (int c = 0; c < cols; c++) {
+                int idx = r * cols + c;
+                if (idx >= (int)items.size()) break;
+                const VehicleEntry& v = *items[idx];
+                if (c) ImGui::SameLine(0, gap);
+                ImGui::PushID(v.model);
+                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                if (ImGui::InvisibleButton("##tile", ImVec2(tile, tileH))) selected = v.model;
+                bool hov = ImGui::IsItemHovered();
+                if (hov && ImGui::IsMouseDoubleClicked(0)) { int m = v.model; Queue([m] { SpawnVehicle(m); }); }
+                if (hov) ImGui::SetTooltip("%s", v.name.c_str());
+                ImGui::PopID();
+                ImVec2 p1(p0.x + tile, p0.y + tileH);
+                bool on = selected == v.model;
+                dl->AddRectFilledMultiColor(p0, ImVec2(p1.x, p0.y + tile),
+                                            IM_COL32(58, 62, 80, 255), IM_COL32(58, 62, 80, 255),
+                                            IM_COL32(24, 25, 33, 255), IM_COL32(24, 25, 33, 255));
+                if (hov && !on) dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 14), 6.0f);
+                if (void* pic = VehiclePicture(v.model))
+                    dl->AddImage((ImTextureID)(intptr_t)pic, ImVec2(p0.x + 4, p0.y + 4), ImVec2(p1.x - 4, p0.y + tile - 4));
+                else {
+                    const char* t = VehiclePictureMissing(v.model) ? "no picture" : "...";
+                    ImVec2 ts = ImGui::CalcTextSize(t);
+                    dl->AddText(ImVec2(p0.x + (tile - ts.x) * 0.5f, p0.y + (tile - ts.y) * 0.5f), ImGui::GetColorU32(ImGuiCol_TextDisabled), t);
+                }
+                std::string nm = shortName(v.name);
+                ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
+                ImVec2 tp(p0.x + fmaxf(4.0f, (tile - ts.x) * 0.5f), p0.y + tile + 4);
+                dl->PushClipRect(ImVec2(p0.x + 2, p0.y), ImVec2(p1.x - 2, p1.y), true);
+                dl->AddText(tp, ImGui::GetColorU32(on || hov ? ImGuiCol_Text : ImGuiCol_TextDisabled), nm.c_str());
+                dl->PopClipRect();
+                dl->AddRect(p0, p1, on ? ImGui::GetColorU32(kAccent) : ImGui::GetColorU32(ImGuiCol_Border), 6.0f, 0, on ? 2.0f : 1.0f);
+            }
         }
+    }
+    VehiclePicturesPump();                                   // makes the next missing picture on screen
+    ImGui::EndChild();
+}
+
+// Skins: every look in one list. Click a row and the player wears it at once
+// (a try-on); double-click keeps it. Leave the page or close the menu without
+// keeping, and the look from before comes back.
+static std::string g_skinTry;                 // look being tried on (menu side), empty = none
+static int g_skinTabFrame = -10;              // last frame the page was drawn
+static std::string s_skinOrig;                // game side: the look before the try-on
+static bool s_skinTrying = false;
+
+static void SkinTryOn(const std::string& n) {
+    g_skinTry = n;
+    Queue([n] {
+        if (!s_skinTrying) s_skinOrig = CurrentPlayerSkin();
+        if (SetPlayerSkin(n.c_str(), true)) s_skinTrying = true;
+    });
+}
+static void SkinKeep(const std::string& n) {
+    g_skinTry.clear();
+    Queue([n] {
+        if (!_stricmp(CurrentPlayerSkin().c_str(), n.c_str())) ShowNative("Now wearing: %s", n.c_str());
+        else if (!SetPlayerSkin(n.c_str())) return;
+        s_skinTrying = false;
+    });
+}
+static void SkinPutBack() {
+    g_skinTry.clear();
+    Queue([] {
+        if (!s_skinTrying) return;
+        s_skinTrying = false;
+        SetPlayerSkin(s_skinOrig.c_str(), true);
+    });
+}
+
+static void SkinsTab() {
+    g_skinTabFrame = ImGui::GetFrameCount();
+    // the arrow keys walk the list here, not the menu's keyboard navigation
+    // (given back in DrawTrainerMenu once the page is gone)
+    ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+    static std::string cursor;                 // the highlighted look (tried on or kept)
+    static bool scrollTo = false;
+    int step = 0;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true))   step = -1;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) step = +1;
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+    static char filter[32] = "";
+    ImGui::SetNextItemWidth(Wd(220));
+    ImGui::InputTextWithHint("##filter", "Search...", filter, sizeof filter);
+    ImGui::SameLine();
+    if (!g_skinTry.empty()) {
+        if (ImGui::Button("Keep")) SkinKeep(g_skinTry);
+        ImGui::SameLine();
+        if (ImGui::Button("Put back")) SkinPutBack();
+        ImGui::SameLine();
+        ImGui::Text("Trying on: %s", g_skinTry.c_str());
+    } else {
+        ImGui::TextDisabled("Click or Up/Down to try a look on, double-click or Enter to keep it. On foot only.");
+    }
+    std::vector<std::string> looks;            // the rows shown, in order (for the arrow keys)
+    std::string f = filter;
+    for (auto& ch : f) ch = (char)tolower(ch);
+    auto match = [&](const std::string& s) {
+        if (f.empty()) return true;
+        std::string a = s; for (auto& ch : a) ch = (char)tolower(ch);
+        return a.find(f) != std::string::npos;
+    };
+    // one row: click tries it on, double-click keeps it
+    auto row = [&](const std::string& look, const char* label) {
+        looks.push_back(look);
+        bool on = !_stricmp(cursor.c_str(), look.c_str());
+        if (ImGui::Selectable(label, on, ImGuiSelectableFlags_AllowDoubleClick)) {
+            cursor = look;
+            if (ImGui::IsMouseDoubleClicked(0)) SkinKeep(look);
+            else SkinTryOn(look);
+        }
+        if (on && scrollTo) { ImGui::SetScrollHereY(0.5f); scrollTo = false; }
+    };
+
+    ImGui::BeginChild("skinlist", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    Section("Tommy's outfits");
+    for (auto& o : kOutfits) {
+        if (!match(o.name)) continue;
+        char look[12];
+        if (o.id == 0) strcpy(look, "PLAYER"); else snprintf(look, sizeof look, "PLAYER%d", o.id);
+        ImGui::PushID(look);
+        row(look, o.name);
         ImGui::PopID();
     }
+    Section("People");
+    for (auto& m : PedModels()) {
+        if (!match(m.name)) continue;
+        char lbl[64]; snprintf(lbl, sizeof lbl, "%s##%d", m.name.c_str(), m.id);
+        float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        row(m.name, lbl);
+        ImGui::SameLine(right - ImGui::CalcTextSize("0000").x);
+        ImGui::TextDisabled("%d", m.id);
+    }
     ImGui::EndChild();
+
+    // keyboard: Up/Down tries the next look on, Enter keeps the highlighted one
+    if (step && !looks.empty()) {
+        int at = -1;
+        for (int i = 0; i < (int)looks.size(); i++) if (!_stricmp(looks[i].c_str(), cursor.c_str())) { at = i; break; }
+        int next = at < 0 ? (step > 0 ? 0 : (int)looks.size() - 1)
+                          : (at + step + (int)looks.size()) % (int)looks.size();
+        cursor = looks[next];
+        scrollTo = true;
+        SkinTryOn(cursor);
+    }
+    if (enter && !cursor.empty()) SkinKeep(cursor);
 }
 
 static void WorldTab() {
     using namespace game;
     Section("Time");
-    static int h = 12, m = 0;
+    // The sliders follow the game's clock and set it live as they move. While
+    // one is dragged (or its change is still queued) it keeps its own value.
+    static int h = 12, m = 0, holdFrames = 0;
+    if (holdFrames > 0) holdFrames--;
+    else { h = *ClockHours; m = *ClockMinutes; }
     ImGui::Text("Game clock: %02d:%02d", *ClockHours, *ClockMinutes);
-    ImGui::SetNextItemWidth(200); ImGui::SliderInt("Hour", &h, 0, 23);
-    ImGui::SetNextItemWidth(200); ImGui::SliderInt("Minute", &m, 0, 59);
-    if (ImGui::Button("Set time")) { int hh = h, mm = m; Queue([hh, mm] { SetTime(hh, mm); }); }
-    ImGui::SameLine();
+    ImGui::SetNextItemWidth(Wd(200));
+    bool hourMoved = ImGui::SliderInt("Hour", &h, 0, 23);
+    if (ImGui::IsItemActive()) holdFrames = 3;
+    ImGui::SetNextItemWidth(Wd(200));
+    bool minMoved = ImGui::SliderInt("Minute", &m, 0, 59);
+    if (ImGui::IsItemActive()) holdFrames = 3;
+    if (hourMoved || minMoved) {
+        int hh = h, mm = m; holdFrames = 3;
+        Queue([hh, mm] { SetTime(hh, mm); });
+    }
     if (ImGui::Checkbox("Freeze time", &S.freezeTime) && S.freezeTime) {
         S.frozenHour = *ClockHours; S.frozenMinute = *ClockMinutes;
     }
 
+    Section("Camera");
+    ImGui::SetNextItemWidth(Wd(250));
+    ImGui::SliderFloat("Field of view", &S.fov, 40.0f, 120.0f, "%.0f deg");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How much of the world you see, on foot and driving. The game's own is 70.\n"
+                          "Aiming, scopes and first-person views keep the game's own zoom.");
+    ImGui::SameLine();
+    if (ImGui::Button("Default##fov")) S.fov = 70.0f;
+
     Section("Weather");
-    const char* weathers[] = { "Sunny", "Cloudy", "Rain", "Fog", "Extra sunny", "Hurricane", "Extra colours" };
+    const char* weathers[] = { "Sunny", "Cloudy", "Rain", "Fog", "Extra sunny", "Hurricane" };
     static int w = 0;
-    ImGui::SetNextItemWidth(200); ImGui::Combo("##weather", &w, weathers, 7);
+    ImGui::SetNextItemWidth(Wd(200)); ImGui::Combo("##weather", &w, weathers, 6);
     ImGui::SameLine();
     if (ImGui::Button("Force weather")) { int ww = w; Queue([ww] { ForceWeather(ww); }); }
     ImGui::SameLine();
@@ -403,13 +883,13 @@ static void WorldTab() {
 
     Section("Game speed & population");
     float speed = *TimeScale;
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderFloat("Game speed", &speed, 0.1f, 3.0f, "%.2fx")) Queue([speed] { *TimeScale = speed; });
     ImGui::SameLine(); if (ImGui::Button("Reset##speed")) Queue([] { *TimeScale = 1.0f; });
     float peds = *PedDensity, cars = *CarDensity;
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderFloat("Pedestrians", &peds, 0.0f, 3.0f, "%.2fx")) Queue([peds] { *PedDensity = peds; });
-    ImGui::SetNextItemWidth(250);
+    ImGui::SetNextItemWidth(Wd(250));
     if (ImGui::SliderFloat("Traffic", &cars, 0.0f, 3.0f, "%.2fx")) Queue([cars] { *CarDensity = cars; });
 
     Section("Chaos");
@@ -421,6 +901,7 @@ static void WorldTab() {
 
     Section("Missions");
     ImGui::Checkbox("Disable mission timers (countdown never runs out)", &S.freezeMissionTimer);
+    WorldExtras();
 }
 
 // ---- radar blips for the teleport tab ---------------------------------------
@@ -575,7 +1056,7 @@ static void PlaceIcon(int kind);
 
 static void SavedLocations(const float* pos, bool have) {
     static char name[64] = "";
-    ImGui::SetNextItemWidth(240);
+    ImGui::SetNextItemWidth(Wd(240));
     ImGui::InputTextWithHint("##name", "Name for this spot", name, sizeof name);
     ImGui::SameLine();
     ImGui::BeginDisabled(!have);
@@ -620,11 +1101,14 @@ static bool PlacesTab(const char* label, int count, const char* id, bool open = 
 static void EndPlacesTab() { ImGui::TreePop(); }
 
 // Small drawn icons for list rows that have no radar icon of their own.
+static void PlaceIconAt(ImDrawList* dl, ImVec2 c, float s, int kind);
 static void PlaceIcon(int kind) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float s = ImGui::GetFrameHeight();
-    ImVec2 c(p.x + s * 0.5f, p.y + s * 0.5f);
+    PlaceIconAt(ImGui::GetWindowDrawList(), ImVec2(p.x + s * 0.5f, p.y + s * 0.5f), s, kind);
+    ImGui::Dummy(ImVec2(s, s));
+}
+static void PlaceIconAt(ImDrawList* dl, ImVec2 c, float s, int kind) {
     float r = s * 0.38f;
     const ImU32 dark = IM_COL32(20, 20, 20, 255), white = IM_COL32(255, 255, 255, 255);
     switch (kind) {
@@ -687,7 +1171,6 @@ static void PlaceIcon(int kind) {
                               IM_COL32(190, 90, 230, 255));
         break;
     }
-    ImGui::Dummy(ImVec2(s, s));
 }
 
 // Pickups lying in the world - the side activities that have no radar
@@ -778,7 +1261,7 @@ static void TeleportTab() {
 
     static float target[3] = { 0, 0, 20 };
     static bool ground = true;
-    ImGui::SetNextItemWidth(300);
+    ImGui::SetNextItemWidth(Wd(300));
     ImGui::InputFloat3("##xyz", target, "%.1f");
     ImGui::SameLine();
     if (ImGui::Button("Teleport")) {
@@ -951,7 +1434,7 @@ static void HotkeysTab() {
 
     static char filter[48] = "";
     static bool onlyBound = false;
-    ImGui::SetNextItemWidth(220);
+    ImGui::SetNextItemWidth(Wd(220));
     ImGui::InputTextWithHint("##hkfilter", "Search features...", filter, sizeof filter);
     ImGui::SameLine();
     ImGui::Checkbox("Only bound", &onlyBound);
@@ -1055,23 +1538,44 @@ static void HotkeysTab() {
     ImGui::EndChild();
 }
 
+int& UiLayout();   // menu_list.inc: 0 list (Menyoo style), 1 classic window
 static void SettingsTab() {
+    Section("Look");
+    {
+        const char* layouts[] = { "List (Menyoo style)", "Classic window (this one)" };
+        ImGui::SetNextItemWidth(Wd(250));
+        ImGui::Combo("Menu layout", &UiLayout(), layouts, 2);
+        ImGui::TextDisabled("The list layout has full interface customization in Settings > Interface.");
+    }
     Section("Controls");
     ImGui::BulletText("INSERT or F7 opens and closes this menu.");
     ImGui::BulletText("While it is open the game ignores your mouse and keyboard.");
     ImGui::BulletText("Tab / arrow keys also navigate the menu.");
-    ImGui::SetNextItemWidth(200);
+    ImGui::SetNextItemWidth(Wd(200));
     ImGui::SliderFloat("Mouse speed", &g_mouseSensitivity, 0.25f, 4.0f, "%.2f");
     Section("On-screen overlay (shown while playing)");
-    ImGui::Checkbox("Coordinates", &S.overlayCoords); ImGui::SameLine(160);
-    ImGui::Checkbox("Vehicle speed", &S.overlaySpeed); ImGui::SameLine(320);
+    ImGui::Checkbox("Coordinates", &S.overlayCoords); Col(1);
+    ImGui::Checkbox("Vehicle speed", &S.overlaySpeed); Col(2);
     ImGui::Checkbox("FPS", &S.overlayFps);
-    ImGui::Checkbox("Active cheats list", &S.overlayActive);
+    ImGui::Checkbox("Active cheats list", &S.overlayActive); Col(2);
+    ImGui::Checkbox("Speed meter", &S.overlayShowPos);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Your speed (vel), like CS:GO's speed meter, with the other stats. It counts\n"
+                          "every way you move: running, driving, bunny hopping, surfing, flying.");
+    if (S.overlayShowPos) {
+        ImGui::Indent();
+        ImGui::TextUnformatted("Speed in"); ImGui::SameLine();
+        ImGui::RadioButton("u/s (CS:GO)", &S.showPosUnits, 0); ImGui::SameLine();
+        ImGui::RadioButton("km/h", &S.showPosUnits, 1); ImGui::SameLine();
+        ImGui::RadioButton("m/s", &S.showPosUnits, 2);
+        ImGui::Unindent();
+    }
     Section("Settings file");
     ImGui::TextWrapped("Toggles, hotkeys and mouse speed are saved to VCTrainer.ini when you close the menu.");
     if (ImGui::Button("Save now")) SaveSettings();
     Section("About");
-    ImGui::TextWrapped("Modern VC Trainer for GTA Vice City v1.0, built with Dear ImGui %s.", IMGUI_VERSION);
+    ImGui::TextWrapped("Modern VC Trainer v%s for GTA Vice City v1.0, built with Dear ImGui %s. "
+                       "What it did at start-up (hooks, settings) is in VCTrainer.log.", VCTRAINER_VERSION, IMGUI_VERSION);
 }
 
 static void DrawOverlay() {
@@ -1087,9 +1591,12 @@ static void DrawOverlay() {
         if (S.overlayCoords && GetPlayerPos(p)) ImGui::Text("%.1f, %.1f, %.1f", p[0], p[1], p[2]);
         if (S.overlaySpeed && PlayerVehicle()) ImGui::Text("%.0f km/h", VehicleSpeedKmh());
         if (S.overlayFps) ImGui::Text("%.0f FPS", ImGui::GetIO().Framerate);
+        ShowPos sp;
+        if (S.overlayShowPos && GetShowPos(sp))
+            ImGui::Text("vel: %.0f%s", sp.vel, S.showPosUnits == 1 ? " km/h" : S.showPosUnits == 2 ? " m/s" : " u/s");
         if (S.overlayActive) {
             auto items = ActiveCheats();
-            if (S.overlayCoords || S.overlaySpeed || S.overlayFps) ImGui::Separator();
+            if (S.overlayCoords || S.overlaySpeed || S.overlayFps || S.overlayShowPos) ImGui::Separator();
             if (items.empty()) ImGui::TextDisabled("No cheats active");
             for (auto& a : items) ImGui::TextColored(ImVec4(0.40f, 0.95f, 0.65f, 1.0f), "%s", a.label.c_str());
         }
@@ -1102,7 +1609,7 @@ static void DrawOverlay() {
 // crosshair on the one the aim lock is on, and arrows at the screen edge for
 // the ones behind you or off to the side.
 static void DrawEnemyMarks() {
-    auto marks = EnemyMarks();
+    const auto& marks = EnemyMarks();
     if (marks.empty()) return;
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImVec2 ds = ImGui::GetIO().DisplaySize;
@@ -1160,41 +1667,199 @@ static void DrawEnemyMarks() {
     }
 }
 
-void DrawTrainerMenu() {
-    DrawEnemyMarks();
-    DrawOverlay();
-    if (!g_menuOpen) return;
-    ImGui::SetNextWindowSize(ImVec2(600, 560), ImGuiCond_FirstUseEver);
+// The Classic window's own look. Applied only while the Classic window draws
+// (and restored right after), so the list menu, the overlay and everything
+// else keep the shared style untouched.
+static void ApplyClassicStyle(ImGuiStyle& s) {
+    s.WindowRounding = 10; s.ChildRounding = 8; s.FrameRounding = 6; s.PopupRounding = 8;
+    s.GrabRounding = 6; s.TabRounding = 6; s.ScrollbarRounding = 8;
+    s.WindowPadding = ImVec2(14, 12); s.FramePadding = ImVec2(9, 5); s.ItemSpacing = ImVec2(10, 7);
+    s.ItemInnerSpacing = ImVec2(7, 5); s.IndentSpacing = 22; s.ScrollbarSize = 12; s.GrabMinSize = 12;
+    s.WindowBorderSize = 1; s.ChildBorderSize = 1; s.FrameBorderSize = 0; s.PopupBorderSize = 1;
+    ImVec4* c = s.Colors;
+    const ImVec4 bg(0.067f, 0.071f, 0.098f, 0.97f), panel(0.094f, 0.098f, 0.133f, 1.0f);
+    const ImVec4 frame(0.137f, 0.141f, 0.188f, 1.0f), frameHi(0.180f, 0.184f, 0.243f, 1.0f);
+    const ImVec4 pinkDim(0.96f, 0.30f, 0.62f, 0.55f), pinkLo(0.96f, 0.30f, 0.62f, 0.22f);
+    c[ImGuiCol_Text]                 = ImVec4(0.93f, 0.94f, 0.97f, 1.0f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.52f, 0.55f, 0.64f, 1.0f);
+    c[ImGuiCol_WindowBg]             = bg;
+    c[ImGuiCol_ChildBg]              = panel;
+    c[ImGuiCol_PopupBg]              = ImVec4(0.086f, 0.090f, 0.122f, 0.98f);
+    c[ImGuiCol_Border]               = ImVec4(1.0f, 1.0f, 1.0f, 0.07f);
+    c[ImGuiCol_FrameBg]              = frame;
+    c[ImGuiCol_FrameBgHovered]       = frameHi;
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.22f, 0.22f, 0.29f, 1.0f);
+    c[ImGuiCol_TitleBg]              = bg;
+    c[ImGuiCol_TitleBgActive]        = bg;
+    c[ImGuiCol_Button]               = frame;
+    c[ImGuiCol_ButtonHovered]        = pinkDim;
+    c[ImGuiCol_ButtonActive]         = kAccent;
+    c[ImGuiCol_Header]               = pinkLo;
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.96f, 0.30f, 0.62f, 0.35f);
+    c[ImGuiCol_HeaderActive]         = pinkDim;
+    c[ImGuiCol_CheckMark]            = kAccent;
+    c[ImGuiCol_SliderGrab]           = kAccent;
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(1.0f, 0.48f, 0.74f, 1.0f);
+    c[ImGuiCol_Separator]            = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
+    c[ImGuiCol_SeparatorHovered]     = pinkDim;
+    c[ImGuiCol_SeparatorActive]      = kAccent;
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.0f, 1.0f, 1.0f, 0.20f);
+    c[ImGuiCol_ScrollbarGrabActive]  = pinkDim;
+    c[ImGuiCol_Tab]                  = frame;
+    c[ImGuiCol_TabHovered]           = pinkDim;
+    c[ImGuiCol_TabSelected]          = ImVec4(0.96f, 0.30f, 0.62f, 0.75f);
+    c[ImGuiCol_TableHeaderBg]        = frame;
+    c[ImGuiCol_TableRowBg]           = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_TableRowBgAlt]        = ImVec4(1.0f, 1.0f, 1.0f, 0.025f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ResizeGripHovered]    = pinkDim;
+    c[ImGuiCol_ResizeGripActive]     = kAccent;
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.96f, 0.30f, 0.62f, 0.35f);
+}
+
+// Classic window: a header (title, master switch, close), a sidebar with the
+// pages and the page itself in a scrolling panel.
+static void DrawClassicMenu() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGuiStyle saved = style;
+    ApplyClassicStyle(style);
+
+    const float u = ImGui::GetFontSize() / 13.0f;          // the pages were sized for a 13 px font
+    ImGui::SetNextWindowSize(ImVec2(740 * u, 520 * u), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(60, 60), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Modern VC Trainer###VC Trainer", &g_menuOpen, ImGuiWindowFlags_NoCollapse)) { ImGui::End(); return; }
+    // wide enough for the widest rows (Teleport's X / Y / Z + button) at any font size
+    ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 46, ImGui::GetFontSize() * 26), ImVec2(FLT_MAX, FLT_MAX));
+    if (!ImGui::Begin("Modern VC Trainer###VC Trainer", &g_menuOpen,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::End(); style = saved; return;
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Master switch: pauses every cheat at once without forgetting what was on.
+    // ---- header
     {
+        ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+        float hh = ImGui::GetFrameHeight() + style.WindowPadding.y * 2;
+        dl->AddRectFilledMultiColor(ImVec2(wp.x + 8, wp.y), ImVec2(wp.x + ws.x - 8, wp.y + 3),
+            ImGui::GetColorU32(kAccent), ImGui::GetColorU32(kAccent2), ImGui::GetColorU32(kAccent2), ImGui::GetColorU32(kAccent));
+        dl->AddLine(ImVec2(wp.x, wp.y + hh), ImVec2(wp.x + ws.x, wp.y + hh), ImGui::GetColorU32(ImGuiCol_Border));
+
+        ImGui::SetCursorPosY(style.WindowPadding.y + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::TextColored(kAccent, "VICE CITY");
+        ImGui::SameLine(0, 6);
+        ImGui::TextUnformatted("TRAINER");
+
         bool on = S.enabled;
-        ImVec4 col = on ? ImVec4(0.10f, 0.62f, 0.38f, 1.0f) : ImVec4(0.55f, 0.12f, 0.16f, 1.0f);
+        const char* lbl = on ? "TRAINER ON" : "TRAINER OFF";
+        float bw = ImGui::CalcTextSize("TRAINER OFF").x + style.FramePadding.x * 4;
+        float closeW = ImGui::GetFrameHeight();
+        ImGui::SameLine(ImGui::GetCurrentWindow()->WorkRect.Max.x - wp.x - bw - closeW - style.ItemSpacing.x);
+        ImGui::SetCursorPosY(style.WindowPadding.y);
+        ImVec4 col = on ? ImVec4(0.12f, 0.62f, 0.40f, 1.0f) : ImVec4(0.62f, 0.15f, 0.20f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, col);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(col.x + 0.1f, col.y + 0.1f, col.z + 0.1f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(col.x + 0.08f, col.y + 0.08f, col.z + 0.08f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
-        if (ImGui::Button(on ? "TRAINER ON" : "TRAINER OFF", ImVec2(140, 0))) Queue([on] { SetTrainerEnabled(!on); });
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ImGui::GetFrameHeight() * 0.5f);
+        if (ImGui::Button(lbl, ImVec2(bw, 0))) Queue([on] { SetTrainerEnabled(!on); });
+        ImGui::PopStyleVar();
         ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(on ? "Click to pause every cheat at once (your choices are kept)."
+                                 : "All cheats paused (your choices are kept). Only its hotkey works.");
         ImGui::SameLine();
-        ImGui::TextDisabled(on ? "Click to pause every cheat at once."
-                               : "All cheats paused (your choices are kept). Only its hotkey works.");
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.20f, 0.25f, 0.85f));
+        if (ImGui::Button("X", ImVec2(closeW, 0))) g_menuOpen = false;
+        ImGui::PopStyleColor(2);
+        ImGui::SetCursorPosY(hh + style.ItemSpacing.y);
     }
 
-    if (ImGui::BeginTabBar("tabs")) {
-        char activeLabel[32];
-        snprintf(activeLabel, sizeof activeLabel, "Active (%d)###active", (int)ActiveCheats().size());
-        if (ImGui::BeginTabItem(activeLabel)) { ActiveTab(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Player"))   { PlayerTab();   ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Weapons"))  { WeaponsTab();  ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Vehicle"))  { VehicleTab();  ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("World"))    { WorldTab();    ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Teleport")) { TeleportTab(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Cheats"))   { CheatsTab();   ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Hotkeys"))  { HotkeysTab();  ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Settings")) { SettingsTab(); ImGui::EndTabItem(); }
-        ImGui::EndTabBar();
+    // ---- sidebar
+    static int page = 1;
+    char activeLabel[32];
+    snprintf(activeLabel, sizeof activeLabel, "Active (%d)", (int)ActiveCheats().size());
+    const char* pages[] = { activeLabel, "Player", "Weapons", "Vehicle", "Spawner", "Skins", "World", "Peds",
+                            "Teleport", "Cheats", "Hotkeys", "Settings" };
+    static const char* blurbs[] = {
+        "everything switched on right now", "health, aim, movement", "guns, ammo and special bullets",
+        "tune and handle vehicles", "pick a vehicle, see it, spawn it", "click to try a look on, double-click to keep it",
+        "time, weather, traffic and physics", "bodyguards and the people around you",
+        "places, blips and saved spots", "the game's own cheat codes", "keys for every feature", "look, controls and overlay" };
+    const int pageCount = IM_ARRAYSIZE(pages);
+    float sideW = 0;
+    for (auto* p : pages) sideW = fmaxf(sideW, ImGui::CalcTextSize(p).x);
+    sideW += 44;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 8));
+    ImGui::BeginChild("##side", ImVec2(sideW, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImDrawList* sd = ImGui::GetWindowDrawList();
+    for (int i = 0; i < pageCount; i++) {
+        bool sel = page == i;
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x, rh = ImGui::GetTextLineHeight() + 14;
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##p", ImVec2(w, rh))) page = i;
+        bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+        ImVec2 p1(p0.x + w, p0.y + rh);
+        if (sel)      sd->AddRectFilled(p0, p1, ImGui::GetColorU32(ImVec4(0.96f, 0.30f, 0.62f, 0.20f)), 6.0f);
+        else if (hov) sd->AddRectFilled(p0, p1, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.05f)), 6.0f);
+        if (sel) sd->AddRectFilled(ImVec2(p0.x, p0.y + 6), ImVec2(p0.x + 3, p1.y - 6), ImGui::GetColorU32(kAccent), 2.0f);
+        sd->AddText(ImVec2(p0.x + 14, p0.y + 7), ImGui::GetColorU32(sel || hov ? ImGuiCol_Text : ImGuiCol_TextDisabled), pages[i]);
+        if (i == 0 || i == 7 || i == 9) {                      // groups: status | game | places | setup
+            ImGui::Dummy(ImVec2(0, 1));
+            ImVec2 a = ImGui::GetCursorScreenPos();
+            sd->AddLine(ImVec2(a.x + 8, a.y), ImVec2(a.x + w - 8, a.y), ImGui::GetColorU32(ImGuiCol_Separator));
+            ImGui::Dummy(ImVec2(0, 3));
+        }
     }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    // ---- page
+    ImGui::SameLine();
+    ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::TextUnformatted(page == 0 ? "Active" : pages[page]);
+    ImGui::SameLine(0, 10);
+    ImGui::TextDisabled("%s", blurbs[page]);
+    switch (page) {
+        case 0: ActiveTab();   break;
+        case 1: PlayerTab();   break;
+        case 2: WeaponsTab();  break;
+        case 3: VehicleTab();  break;
+        case 4: SpawnerTab();  break;
+        case 5: SkinsTab();    break;
+        case 6: WorldTab();    break;
+        case 7: PedsTab();     break;
+        case 8: TeleportTab(); break;
+        case 9: CheatsTab();   break;
+        case 10: HotkeysTab(); break;
+        default: SettingsTab(); break;
+    }
+    ImGui::EndChild();
+
     ImGui::End();
+    style = saved;
+}
+
+#include "menu_list.inc"
+
+void DrawTrainerMenu() {
+    if (!game::ReplayPlaying()) {           // replay: peds are the recording's, nothing to mark or measure
+        DrawEnemyMarks();
+        DrawOverlay();
+    }
+    // a try-on not kept: put the old look back once the Skins page is gone
+    if (g_skinTabFrame < ImGui::GetFrameCount() - 1) {
+        if (!g_skinTry.empty()) SkinPutBack();
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // arrows drive the menu again
+    }
+    static bool wasOpen = false;
+    if (wasOpen && !g_menuOpen) { SaveUi(); g_uiDirty = false; g_editRow = -1; g_colorEdit = nullptr; }   // closed: keep the look
+    wasOpen = g_menuOpen;
+    if (!g_menuOpen) return;
+    if (T.layout == 1) DrawClassicMenu();
+    else DrawListMenu();
 }
