@@ -7,7 +7,9 @@ set IMGUI=third_party\imgui
 zig c++ -target x86-windows-gnu -std=c++17 -O2 -s -shared -fno-exceptions -fno-rtti ^
   -DIMGUI_USE_BGRA_PACKED_COLOR -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -I%IMGUI% ^
   -o VCTrainer.asi ^
-  src\dllmain.cpp src\hooks.cpp src\features.cpp src\menu.cpp src\imgui_impl_dx8.cpp ^
+  src\dllmain.cpp src\hooks.cpp src\log.cpp ^
+  src\settings.cpp src\player.cpp src\vehicle.cpp src\combat.cpp src\movement.cpp src\teleport.cpp src\peds.cpp src\world.cpp ^
+  src\menu.cpp src\vehpreview.cpp src\imgui_impl_dx8.cpp ^
   %IMGUI%\imgui.cpp %IMGUI%\imgui_draw.cpp %IMGUI%\imgui_tables.cpp %IMGUI%\imgui_widgets.cpp ^
   -luser32 -lkernel32
 if errorlevel 1 exit /b 1
